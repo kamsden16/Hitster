@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HITSTER — Music Timeline Game</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,300;0,400;0,600;1,300&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- SCREEN: Auth -->
+  <div id="screen-auth" class="screen active">
+    <div class="hero-bg"></div>
+    <div class="auth-card">
+      <div class="logo">HITSTER</div>
+      <p class="tagline">The music timeline party game</p>
+      <div class="vinyl-art">
+        <div class="vinyl-disc">
+          <div class="vinyl-label"><span>♪</span></div>
+        </div>
+      </div>
+      <button id="btn-spotify-login" class="btn btn-spotify">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>
+        Connect with Spotify
+      </button>
+      <p class="note">Spotify Premium required for in-browser playback</p>
+    </div>
+  </div>
+
+  <!-- SCREEN: Lobby -->
+  <div id="screen-lobby" class="screen">
+    <header class="game-header">
+      <div class="logo-sm">HITSTER</div>
+      <div class="player-badge" id="player-name-badge"></div>
+    </header>
+
+    <div id="lobby-main">
+      <div class="lobby-options">
+        <div class="lobby-card" id="card-create">
+          <h2>Host a Game</h2>
+          <input type="text" id="input-host-name" placeholder="Your name" maxlength="20" class="input-field">
+          <button id="btn-create-room" class="btn btn-primary">Create Room</button>
+        </div>
+        <div class="divider-or"><span>or</span></div>
+        <div class="lobby-card" id="card-join">
+          <h2>Join a Game</h2>
+          <input type="text" id="input-join-name" placeholder="Your name" maxlength="20" class="input-field">
+          <input type="text" id="input-room-code" placeholder="Room code" maxlength="5" class="input-field code-input">
+          <button id="btn-join-room" class="btn btn-secondary">Join Room</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCREEN: Room -->
+  <div id="screen-room" class="screen">
+    <header class="game-header">
+      <div class="logo-sm">HITSTER</div>
+      <div class="room-info">
+        Room: <span id="room-code-display" class="room-code"></span>
+      </div>
+    </header>
+
+    <div class="room-layout">
+      <!-- Players list -->
+      <div class="players-panel">
+        <h3>Players</h3>
+        <ul id="players-list"></ul>
+        <div id="token-controls" class="token-controls hidden"></div>
+        <div class="win-target">First to <strong id="win-score-display">10</strong> songs wins</div>
+      </div>
+
+      <!-- Host controls -->
+      <div class="host-controls" id="host-controls">
+        <h3>Host Controls</h3>
+        <button id="btn-reconnect-spotify" class="btn btn-sm btn-secondary">↻ Reconnect Spotify</button>
+        <div id="playlist-section">
+          <button id="btn-load-playlists" class="btn btn-secondary btn-sm">Browse My Playlists</button>
+          <div id="playlists-dropdown" class="hidden"></div>
+          <div class="or-manual">or paste a playlist ID / URL:</div>
+          <div class="input-row">
+            <input type="text" id="input-playlist" placeholder="Spotify playlist ID or URL" class="input-field">
+            <button id="btn-load-playlist" class="btn btn-secondary btn-sm">Load</button>
+          </div>
+          <div id="playlist-status" class="playlist-status hidden"></div>
+          <div id="playlist-progress-bar" class="playlist-progress hidden">
+            <div id="playlist-progress-fill" class="playlist-progress-fill"></div>
+            <span id="playlist-progress-label" class="playlist-progress-label">Loading…</span>
+          </div>
+        </div>
+        <button id="btn-start-game" class="btn btn-primary" disabled>Start Game</button>
+      </div>
+
+      <!-- Waiting (non-host) -->
+      <div class="waiting-panel" id="waiting-panel">
+        <div class="waiting-spinner"></div>
+        <p>Waiting for host to start…</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCREEN: Game -->
+  <div id="screen-game" class="screen">
+    <header class="game-header">
+      <div class="logo-sm">HITSTER</div>
+      <div class="round-status" id="round-status"></div>
+    </header>
+    <div id="game-token-controls" class="game-token-bar hidden"></div>
+    <div id="host-editor-bar" class="host-editor-bar hidden">
+      <button id="btn-open-editor" class="btn btn-sm btn-secondary">✏️ Edit Timelines</button>
+    </div>
+
+    <div class="game-layout">
+      <!-- Now Playing -->
+      <div class="now-playing-panel">
+        <div id="track-cover" class="track-cover">
+          <div class="vinyl-disc sm">
+            <div class="vinyl-label sm"><span id="cover-note">♪</span></div>
+          </div>
+        </div>
+        <div id="now-playing-info">
+          <p class="np-label">Now Playing</p>
+          <p class="np-hidden" id="np-title">???</p>
+          <p class="np-hidden" id="np-artist">???</p>
+          <p class="np-hidden" id="np-year">????</p>
+        </div>
+        <div id="player-controls">
+          <button id="btn-preview-play" class="btn btn-sm btn-secondary hidden">▶ Play Preview</button>
+          <div id="spotify-player-container">
+            <div id="player-status" class="player-status">Open Spotify on any device</div>
+          </div>
+          <div class="volume-control">
+            <span class="volume-icon">🔊</span>
+            <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="0.8" class="volume-slider">
+            <span id="volume-display" class="volume-display">80%</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Year Guesser -->
+      <div class="guess-panel" id="guess-panel">
+        <h3>When was this released?</h3>
+        <div class="year-picker">
+          <button class="year-adj" id="btn-year-down">◀</button>
+          <div class="year-display" id="year-display">1990</div>
+          <button class="year-adj" id="btn-year-up">▶</button>
+        </div>
+        <div class="year-slider-wrap">
+          <input type="range" id="year-slider" min="1950" max="2024" value="1990" class="year-slider">
+          <div class="year-labels"><span>1950</span><span>1980</span><span>2000</span><span>2024</span></div>
+        </div>
+        <button id="btn-submit-guess" class="btn btn-primary">Lock In Answer</button>
+        <p id="guess-submitted-msg" class="guess-submitted hidden">✓ Answer locked! Waiting for others…</p>
+        <button id="btn-skip-song" class="btn btn-secondary hidden">⏭ Skip Song (costs 1 🪙)</button>
+        <button id="btn-free-card" class="btn btn-secondary hidden">🎁 Free Card (costs 3 🪙)</button>
+        <button id="btn-end-steal" class="btn btn-primary hidden">✓ Reveal Now</button>
+        <div id="steal-panel" class="steal-panel hidden">
+          <p class="steal-label">🪙 Spend 1 token to steal — pick the gap:</p>
+          <div id="steal-gaps"></div>
+          <button id="btn-cancel-steal" class="btn btn-secondary btn-sm">Cancel</button>
+        </div>
+        <button id="btn-attempt-steal" class="btn btn-secondary hidden">🪙 Attempt Steal (costs 1 🪙)</button>
+      </div>
+
+      <!-- My Timeline -->
+      <div class="timeline-panel">
+        <div class="timeline-header">
+          <h3>My Timeline <span id="my-score-badge" class="score-badge">0</span></h3>
+          <div class="my-tokens-display">🪙 <span id="my-token-count">2</span></div>
+        </div>
+        <div id="my-timeline" class="timeline-track">
+          <div class="timeline-empty">No songs yet — get the first one right!</div>
+        </div>
+      </div>
+
+      <!-- Players Scoreboard -->
+      <div class="scoreboard-panel">
+        <h3>Players</h3>
+        <ul id="game-players-list" class="game-players-list"></ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCREEN: Reveal -->
+  <div id="screen-reveal" class="screen">
+    <div class="reveal-card">
+      <div class="reveal-song-info">
+        <p class="reveal-label">The song was…</p>
+        <h2 id="reveal-title"></h2>
+        <p id="reveal-artist"></p>
+        <div class="reveal-year-badge" id="reveal-year"></div>
+      </div>
+      <div id="reveal-results" class="reveal-results"></div>
+      <div id="host-year-override" class="host-year-override hidden">
+        <label>Correct year:</label>
+        <input type="number" id="input-override-year" min="1900" max="2024" class="override-year-input">
+        <button id="btn-override-year" class="btn btn-sm btn-secondary">Update Year</button>
+      </div>
+      <button id="btn-next-round" class="btn btn-primary hidden">Next Round →</button>
+      <p id="reveal-waiting" class="reveal-waiting hidden">Waiting for host…</p>
+    </div>
+  </div>
+
+  <!-- SCREEN: Winner -->
+  <div id="screen-winner" class="screen">
+    <div class="winner-card">
+      <div class="winner-fireworks"></div>
+      <p class="winner-label">🏆 Winner!</p>
+      <h1 id="winner-name"></h1>
+      <p>Built a timeline of <strong id="winner-score"></strong> songs!</p>
+      <button id="btn-play-again" class="btn btn-primary">Play Again</button>
+    </div>
+  </div>
+
+</div>
+
+  <!-- Host Card Editor Modal -->
+  <div id="modal-editor" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h2>Edit Timelines</h2>
+        <button id="btn-close-editor" class="modal-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="editor-player-tabs" class="editor-tabs"></div>
+        <div id="editor-timeline" class="editor-timeline"></div>
+        <div class="editor-add-card">
+          <h4>Add Card</h4>
+          <div class="editor-add-row">
+            <input type="text" id="editor-card-name" placeholder="Song name" class="editor-input">
+            <input type="text" id="editor-card-artist" placeholder="Artist" class="editor-input">
+            <input type="number" id="editor-card-year" placeholder="Year" min="1900" max="2024" class="editor-input editor-input-year">
+            <button id="btn-editor-add" class="btn btn-primary btn-sm">Add</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

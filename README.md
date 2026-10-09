@@ -1,6 +1,6 @@
 # 🎵 Hitster v2 — Music Timeline Party Game
 
-A multiplayer web game where players compete to build a chronological timeline of songs. First to 10 correct placements wins!
+A multiplayer web game where players compete to build a chronological timeline of songs. Reach 10 cards and lead outright when everyone has had their turn to win!
 
 ---
 
@@ -111,7 +111,7 @@ Send friends `https://192.168.1.50:3443` — they'll see a browser security warn
 3. **Host** loads one of their Spotify playlists and clicks Start Game
 4. Each round, a song plays — players use the slider to guess the **release year**
 5. You score a point if your guess puts the song in the **correct position** in your timeline (you don't need the exact year — just the right spot relative to songs you already have)
-6. First to **10 correct placements** wins!
+6. Once someone reaches **10 cards**, the round finishes so everyone gets an equal number of turns. The outright leader at that point wins; if the top is tied, play another full round until someone leads.
 
 ### Scoring example
 If your timeline has songs from 1975 and 1995, and the new song is from 1983:

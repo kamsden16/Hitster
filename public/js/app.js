@@ -17,6 +17,14 @@ const state = {
 
 const socket = io();
 
+// Latest year a song can have — keeps the slider/inputs current instead of hardcoding
+const MAX_YEAR = new Date().getFullYear();
+
+// Escape text before putting it in innerHTML (song titles and names can contain < & " etc.)
+function esc(v) {
+  return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 // ─── Screen management ───────────────────────────────────────────────────────
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -47,6 +55,11 @@ socket.on('room:state', (roomState) => {
   state.roomState = roomState;
   state.isHost = roomState.players.find(p => p.id === state.playerId)?.isHost || false;
   updateRoomUI(roomState);
+
+  // Always rebuild my timeline from the server's copy — covers steals, free cards,
+  // year overrides and host edits without drifting out of sync
+  const me = roomState.players.find(p => p.id === state.playerId);
+  if (me) rebuildTimeline(me.timeline || []);
 
   if (roomState.phase === 'ended' && roomState.winner) {
     showWinner(roomState.winner, roomState.players);
@@ -244,7 +257,7 @@ function renderPlaylistDropdown(playlists) {
   playlists.forEach(p => {
     const item = document.createElement('div');
     item.className = 'playlist-item';
-    item.innerHTML = `${p.name} <span>${p.tracks} tracks</span>`;
+    item.innerHTML = `${esc(p.name)} <span>${esc(p.tracks)} tracks</span>`;
     item.addEventListener('click', () => {
       document.getElementById('input-playlist').value = p.id;
       dd.classList.add('hidden');
@@ -263,7 +276,7 @@ function updateRoomUI(roomState) {
     const isMe = p.id === state.playerId;
     const tokenPips = Array(p.tokens || 0).fill('🪙').join('');
     li.innerHTML = `
-      <span>${p.name}${isMe ? ' (you)' : ''}${p.isHost ? ' <span class="player-host-badge">HOST</span>' : ''}</span>
+      <span>${esc(p.name)}${isMe ? ' (you)' : ''}${p.isHost ? ' <span class="player-host-badge">HOST</span>' : ''}</span>
       <span class="player-score-badge">${p.score} 🎵 ${tokenPips}</span>
     `;
     list.appendChild(li);
@@ -279,7 +292,7 @@ function updateRoomUI(roomState) {
       row.className = 'token-row';
       const pips = Array(p.tokens).fill('<span class="token-pip"></span>').join('');
       row.innerHTML = `
-        <span class="token-row-name">${p.name}</span>
+        <span class="token-row-name">${esc(p.name)}</span>
         <div class="token-row-pips">${pips || '<span style="color:var(--text-muted);font-size:11px">0</span>'}</div>
         <button class="token-adj-btn" onclick="adjustToken('${p.id}', -1)" title="Remove token">−</button>
         <button class="token-adj-btn" onclick="adjustToken('${p.id}', 1)" title="Award token">+</button>
@@ -324,7 +337,7 @@ function updateRoomUI(roomState) {
   }
 
   // If game is playing, switch to game screen
-  if (roomState.phase === 'round' || roomState.phase === 'playing') {
+  if (['round', 'steal', 'reveal', 'playing'].includes(roomState.phase)) {
     if (document.getElementById('screen-room').classList.contains('active')) {
       showScreen('screen-game');
     }
@@ -335,9 +348,10 @@ function updateRoomUI(roomState) {
 
 function updateGameHeader(roomState) {
   const status = document.getElementById('round-status');
-  const answered = roomState.players.filter(p => p.ready).length;
-  const total = roomState.players.length;
-  status.textContent = `${answered}/${total} answered`;
+  const turnText = roomState.turnInCycle ? `Turn ${roomState.turnInCycle}/${roomState.turnsPerCycle}` : '';
+  status.textContent = roomState.finalRound
+    ? `🏁 Final round${turnText ? ' · ' + turnText : ''} — outright leader wins`
+    : turnText;
 
   // Update turn indicator
   const currentPlayer = roomState.players.find(p => p.id === roomState.currentPlayerId);
@@ -369,7 +383,7 @@ function updateTimeline(roomState) {
     const tokenStr = `🪙${p.tokens || 0}`;
     const turnMark = isCurrentTurn ? ' 🎵' : '';
     li.innerHTML = `
-      <span class="gpl-name">${p.name}${turnMark}</span>
+      <span class="gpl-name">${esc(p.name)}${turnMark}</span>
       <span class="gpl-score">${p.score}🃏</span>
       <span class="gpl-tokens">${tokenStr}</span>
     `;
@@ -439,6 +453,13 @@ function startRound(uri, preview_url) {
 // ─── Year Picker ──────────────────────────────────────────────────────────────
 const yearSlider = document.getElementById('year-slider');
 const yearDisplay = document.getElementById('year-display');
+yearSlider.max = MAX_YEAR;
+const yearLabels = document.querySelectorAll('.year-labels span');
+if (yearLabels.length) yearLabels[yearLabels.length - 1].textContent = MAX_YEAR;
+['input-override-year', 'editor-card-year'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.max = MAX_YEAR;
+});
 
 yearSlider.addEventListener('input', () => {
   state.guessedYear = parseInt(yearSlider.value);
@@ -453,7 +474,7 @@ document.getElementById('btn-year-down').addEventListener('click', () => {
 });
 
 document.getElementById('btn-year-up').addEventListener('click', () => {
-  const val = Math.min(2024, parseInt(yearSlider.value) + 1);
+  const val = Math.min(MAX_YEAR, parseInt(yearSlider.value) + 1);
   yearSlider.value = val;
   state.guessedYear = val;
   yearDisplay.textContent = val;
@@ -486,29 +507,28 @@ function showReveal(track, results) {
   resultsEl.innerHTML = '';
   Object.values(results).forEach(r => {
     const row = document.createElement('div');
-    if (r.stolenCard) {
-      row.className = 'reveal-result-row correct';
+    if (r.steal) {
+      const outcome = r.stolenCard ? '✅ Stole the card!'
+        : r.stealCorrect ? '✔ Right spot, but the card was already won'
+        : '❌ Wrong spot';
+      row.className = `reveal-result-row ${r.stolenCard ? 'correct' : 'wrong'}`;
       row.innerHTML = `
-        <span class="rr-name">${r.name}</span>
+        <span class="rr-name">${esc(r.name)}</span>
         <span class="rr-guess">Steal</span>
-        <span class="rr-outcome">✅ Stole the card!</span>
+        <span class="rr-outcome">${outcome}</span>
       `;
     } else {
       row.className = `reveal-result-row ${r.placementCorrect ? 'correct' : 'wrong'}`;
       row.innerHTML = `
-        <span class="rr-name">${r.name}</span>
-        <span class="rr-guess">Guessed: ${r.guessedYear}</span>
+        <span class="rr-name">${esc(r.name)}</span>
+        <span class="rr-guess">Guessed: ${esc(r.guessedYear)}</span>
         <span class="rr-outcome">${r.placementCorrect ? '✅' : '❌'}</span>
       `;
     }
     resultsEl.appendChild(row);
   });
 
-  // Update local timeline display
-  const myResult = results[state.playerId];
-  if (myResult?.placementCorrect) {
-    addToTimeline(track);
-  }
+  // My timeline is rebuilt from the room:state that follows every reveal
 
   // Show next button and host controls for host
   document.getElementById('btn-next-round').classList.toggle('hidden', !state.isHost);
@@ -522,36 +542,6 @@ function showReveal(track, results) {
   }
 
   showScreen('screen-reveal');
-}
-
-function addToTimeline(track) {
-  const container = document.getElementById('my-timeline');
-  const empty = container.querySelector('.timeline-empty');
-  if (empty) empty.remove();
-
-  // Build sorted card list
-  const existing = Array.from(container.querySelectorAll('.timeline-card'));
-  const card = document.createElement('div');
-  card.className = 'timeline-card';
-  card.dataset.year = track.year;
-  card.innerHTML = `
-    <div class="tc-year">${track.year}</div>
-    <div class="tc-title">${track.name}</div>
-    <div class="tc-artist">${track.artist}</div>
-  `;
-
-  // Insert in year order
-  let inserted = false;
-  for (const c of existing) {
-    if (parseInt(c.dataset.year) > track.year) {
-      container.insertBefore(card, c);
-      inserted = true;
-      break;
-    }
-  }
-  if (!inserted) container.appendChild(card);
-  document.getElementById('my-score-badge').textContent =
-    container.querySelectorAll('.timeline-card').length;
 }
 
 document.getElementById('btn-next-round').addEventListener('click', () => {
@@ -980,9 +970,9 @@ function renderEditorTimeline() {
     row.className = 'editor-card-row';
     row.innerHTML = `
       <span class="editor-card-year">${card.year}</span>
-      <span class="editor-card-name">${card.name}</span>
-      <span class="editor-card-artist">${card.artist || ''}</span>
-      <button class="editor-remove-btn" data-id="${card.id}">✕</button>
+      <span class="editor-card-name">${esc(card.name)}</span>
+      <span class="editor-card-artist">${esc(card.artist)}</span>
+      <button class="editor-remove-btn">✕</button>
     `;
     row.querySelector('.editor-remove-btn').addEventListener('click', () => {
       socket.emit('card:remove', { code: state.roomCode, playerId: editorSelectedPlayerId, cardId: card.id });
@@ -1001,7 +991,7 @@ document.getElementById('btn-editor-add').addEventListener('click', () => {
   const name = document.getElementById('editor-card-name').value.trim();
   const artist = document.getElementById('editor-card-artist').value.trim();
   const year = parseInt(document.getElementById('editor-card-year').value);
-  if (!name || !year || year < 1900 || year > 2024) return alert('Enter a valid song name and year');
+  if (!name || !year || year < 1900 || year > MAX_YEAR) return alert('Enter a valid song name and year');
   socket.emit('card:add', { code: state.roomCode, playerId: editorSelectedPlayerId, card: { name, artist, year } });
   document.getElementById('editor-card-name').value = '';
   document.getElementById('editor-card-artist').value = '';
@@ -1036,9 +1026,9 @@ function rebuildTimeline(timeline) {
     el.className = 'timeline-card';
     el.dataset.year = card.year;
     el.innerHTML = `
-      <div class="tc-year">${card.year}</div>
-      <div class="tc-title">${card.name}</div>
-      <div class="tc-artist">${card.artist || ''}</div>
+      <div class="tc-year">${esc(card.year)}</div>
+      <div class="tc-title">${esc(card.name)}</div>
+      <div class="tc-artist">${esc(card.artist)}</div>
     `;
     container.appendChild(el);
   });
@@ -1048,6 +1038,6 @@ function rebuildTimeline(timeline) {
 // ─── Year Override (reveal screen) ───────────────────────────────────────────
 document.getElementById('btn-override-year').addEventListener('click', () => {
   const year = parseInt(document.getElementById('input-override-year').value);
-  if (!year || year < 1900 || year > 2024) return alert('Enter a valid year');
+  if (!year || year < 1900 || year > MAX_YEAR) return alert('Enter a valid year');
   socket.emit('round:override_year', { code: state.roomCode, correctYear: year });
 });

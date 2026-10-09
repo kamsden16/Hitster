@@ -189,8 +189,9 @@ async function refreshToken(socketId) {
 }
 
 // ─── Spotify API helpers ──────────────────────────────────────────────────────
-async function getPlaylistTracks(socketId, playlistId) {
-  const token = await refreshToken(socketId);
+// onBackgroundTracks(tracks) is called with newly-yeared tracks as the background load progresses
+async function getPlaylistTracks(socketId, playlistId, onBackgroundTracks) {
+  let token = await refreshToken(socketId);
   if (!token) throw new Error('Not authenticated');
 
   // Step 1: fetch all playlist items
@@ -226,35 +227,55 @@ async function getPlaylistTracks(socketId, playlistId) {
 
   console.log(`Albums: ${allAlbumIds.length} total, ${uncachedIds.length} not cached, ${allAlbumIds.length - uncachedIds.length} from cache`);
 
+  // Returns 'ok', 'skip' (transient failure, not cached so it's retried next load) or 'auth' (token dead)
   async function fetchAlbumWithRetry(albumId, retries = 4) {
     for (let attempt = 0; attempt <= retries; attempt++) {
+      // Refresh per request — background loads can outlive the 1h access token.
+      // If the host has disconnected their tokens are gone, so keep the last good one.
+      token = (await refreshToken(socketId)) || token;
       try {
         const res = await axios.get(`https://api.spotify.com/v1/albums/${albumId}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         const year = res.data.release_date ? parseInt(res.data.release_date.substring(0, 4)) : null;
         albumCache[albumId] = year;
-        return;
+        return 'ok';
       } catch (err) {
-        if (err.response?.status === 429) {
+        const status = err.response?.status;
+        if (status === 429) {
           const wait = Math.min(parseInt(err.response.headers['retry-after'] || '2') * 1000, 45000);
           console.log(`Rate limited — waiting ${wait / 1000}s… (attempt ${attempt + 1}/${retries})`);
           await new Promise(r => setTimeout(r, wait));
-        } else {
-          console.error(`Album fetch error (${albumId}):`, err.response?.status);
+        } else if (status === 401) {
+          console.error('Album fetch: token expired/invalid — stopping album load');
+          return 'auth';
+        } else if (status === 404 || status === 400) {
+          // Album genuinely doesn't exist — safe to remember that
           albumCache[albumId] = null;
-          return;
+          return 'ok';
+        } else {
+          // Network error / 5xx — don't cache, so it's retried on a future load
+          console.error(`Album fetch error (${albumId}):`, status || err.message);
+          return 'skip';
         }
       }
     }
+    return 'skip';
   }
+
+  const tracksForAlbums = ids => {
+    const set = new Set(ids);
+    return rawTracks
+      .filter(t => set.has(t.albumId) && albumCache[t.albumId] > 0)
+      .map(t => ({ ...t, year: albumCache[t.albumId] }));
+  };
 
   // Initial load — fetch up to INITIAL_CAP uncached albums before returning
   const initialBatch = uncachedIds.slice(0, INITIAL_CAP);
   const remainingBatch = uncachedIds.slice(INITIAL_CAP);
 
   for (let i = 0; i < initialBatch.length; i++) {
-    await fetchAlbumWithRetry(initialBatch[i]);
+    if (await fetchAlbumWithRetry(initialBatch[i]) === 'auth') break;
     if (i % 50 === 0 && i > 0) console.log(`Initial load progress: ${i}/${initialBatch.length}`);
     // Emit progress to socket so UI can show a progress bar
     if (i % 10 === 0) {
@@ -283,11 +304,22 @@ async function getPlaylistTracks(socketId, playlistId) {
 
     setImmediate(async () => {
       console.log(`Background loading ${remainingBatch.length} remaining albums...`);
+      let pendingIds = [];
+      const flushTracks = () => {
+        if (pendingIds.length && onBackgroundTracks) {
+          const newTracks = tracksForAlbums(pendingIds);
+          if (newTracks.length) onBackgroundTracks(newTracks);
+        }
+        pendingIds = [];
+      };
       for (let i = 0; i < remainingBatch.length; i++) {
-        await fetchAlbumWithRetry(remainingBatch[i]);
+        const result = await fetchAlbumWithRetry(remainingBatch[i]);
+        if (result === 'auth') break;
+        pendingIds.push(remainingBatch[i]);
         await new Promise(r => setTimeout(r, DELAY_MS));
         if (i % 50 === 0) {
           saveCache(albumCache);
+          flushTracks();
           // Notify host of background progress every 50 albums
           const s = io.sockets.sockets.get(socketId);
           if (s) s.emit('playlist:progress', {
@@ -299,6 +331,7 @@ async function getPlaylistTracks(socketId, playlistId) {
         }
       }
       saveCache(albumCache);
+      flushTracks();
       const s = io.sockets.sockets.get(socketId);
       if (s) s.emit('playlist:progress', { loaded: uncachedIds.length, total: uncachedIds.length, hasMore: false, background: true, done: true });
       console.log('Background album load complete');
@@ -353,8 +386,160 @@ function getRoomState(room) {
       preview_url: room.currentTrack.preview_url
     } : null,
     winScore: WIN_SCORE,
-    winner: room.winner || null
+    winner: room.winner || null,
+    // Someone has reached WIN_SCORE — game ends at the end of this rotation if they lead outright
+    finalRound: room.players.some(p => p.timeline.length >= WIN_SCORE),
+    turnInCycle: (room.cycleTurns || []).filter(id => room.players.some(p => p.id === id)).length,
+    turnsPerCycle: room.players.length
   };
+}
+
+// ─── Scoring helpers ──────────────────────────────────────────────────────────
+const sortByYear = timeline => [...timeline].sort((a, b) => a.year - b.year);
+
+// Is gapIndex (0 = before first card) a valid spot for trackYear on this sorted timeline?
+function isGapCorrect(sortedTimeline, trackYear, gapIndex) {
+  const strictlyBefore = sortedTimeline.filter(t => t.year < trackYear).length;
+  const strictlyAfter = sortedTimeline.filter(t => t.year > trackYear).length;
+  return gapIndex >= strictlyBefore && gapIndex <= sortedTimeline.length - strictlyAfter;
+}
+
+// The gap a year guess lands in
+function gapForGuess(sortedTimeline, guessedYear) {
+  return sortedTimeline.filter(t => t.year <= guessedYear).length;
+}
+
+// Unique leader with at least WIN_SCORE cards, or null if nobody qualifies / tied at the top
+function findWinner(room) {
+  if (!room.players.length) return null;
+  const max = Math.max(...room.players.map(p => p.timeline.length));
+  if (max < WIN_SCORE) return null;
+  const leaders = room.players.filter(p => p.timeline.length === max);
+  return leaders.length === 1 ? leaders[0] : null;
+}
+
+// Awards this round's card. Safe to call again (year override): it first strips the card
+// from everyone, then re-scores against the timeline snapshot taken when the guess locked in.
+function scoreRound(room) {
+  const track = room.currentTrack;
+  const results = {};
+  room.players.forEach(p => { p.timeline = p.timeline.filter(c => c.id !== track.id); });
+
+  const activePlayer = room.players.find(p => p.id === room.currentPlayerId);
+  const snapshot = room.roundTimelineSnapshot || (activePlayer ? sortByYear(activePlayer.timeline) : []);
+  let cardWinnerId = null;
+
+  // Step 1: active player — they win ties
+  if (activePlayer && room.roundAnswers[activePlayer.id] !== undefined) {
+    const guessedYear = room.roundAnswers[activePlayer.id];
+    const placementCorrect = isGapCorrect(snapshot, track.year, gapForGuess(snapshot, guessedYear));
+    if (placementCorrect) {
+      cardWinnerId = activePlayer.id;
+      activePlayer.timeline.push({ ...track });
+    }
+    results[activePlayer.id] = { name: activePlayer.name, guessedYear, placementCorrect, score: activePlayer.timeline.length };
+  }
+
+  // Step 2: steals, in the order they were made — first correct one wins if the active player missed
+  for (const attempt of room.stealAttempts || []) {
+    const stealer = room.players.find(p => p.id === attempt.socketId);
+    if (!stealer) continue;
+    const correct = isGapCorrect(snapshot, track.year, attempt.gapIndex);
+    let won = false;
+    if (correct && !cardWinnerId) {
+      cardWinnerId = stealer.id;
+      stealer.timeline.push({ ...track });
+      won = true;
+    }
+    results[stealer.id] = { name: stealer.name, steal: true, stealCorrect: correct, stolenCard: won, score: stealer.timeline.length };
+  }
+
+  return results;
+}
+
+function revealPayload(track, results, extra = {}) {
+  return {
+    track: { id: track.id, name: track.name, artist: track.artist, year: track.year, uri: track.uri, preview_url: track.preview_url },
+    results,
+    ...extra
+  };
+}
+
+function clearStealTimer(room) {
+  if (room.stealTimeout) { clearTimeout(room.stealTimeout); room.stealTimeout = null; }
+}
+
+function revealRound(code) {
+  const room = rooms[code];
+  // Only a live steal window can be revealed — guards against a stale timer firing in a later round
+  if (!room || room.phase !== 'steal') return;
+  clearStealTimer(room);
+  room.phase = 'reveal';
+  const results = scoreRound(room);
+  io.to(code).emit('round:reveal', revealPayload(room.currentTrack, results));
+  io.to(code).emit('room:state', getRoomState(room));
+}
+
+// keepPlayer: same player goes again with a new song (token skip)
+function startRound(code, { keepPlayer = false } = {}) {
+  const room = rooms[code];
+  if (!room || !room.players.length) return;
+  clearStealTimer(room);
+  room.cycleTurns = room.cycleTurns || [];
+
+  if (!keepPlayer || !room.players.some(p => p.id === room.currentPlayerId)) {
+    // End of a full rotation? Check for a winner before anyone starts a new one.
+    const everyoneHasGone = room.currentPlayerId && room.players.every(p => room.cycleTurns.includes(p.id));
+    if (everyoneHasGone) {
+      const winner = findWinner(room);
+      if (winner) {
+        room.phase = 'ended';
+        room.winner = winner.name;
+        io.to(code).emit('room:state', getRoomState(room));
+        return;
+      }
+      room.cycleTurns = [];
+    }
+    // Next player in seat order after the current one who hasn't gone this rotation
+    const currentIdx = room.players.findIndex(p => p.id === room.currentPlayerId);
+    let next = null;
+    for (let step = 1; step <= room.players.length; step++) {
+      const candidate = room.players[(currentIdx + step + room.players.length) % room.players.length];
+      if (!room.cycleTurns.includes(candidate.id)) { next = candidate; break; }
+    }
+    if (!next) { room.cycleTurns = []; next = room.players[(currentIdx + 1 + room.players.length) % room.players.length]; }
+    room.currentPlayerId = next.id;
+    room.cycleTurns.push(next.id);
+  }
+
+  // Pick a song nobody has used — and that isn't already sitting on someone's timeline
+  const onTimelines = new Set(room.players.flatMap(p => p.timeline.map(c => c.id)));
+  let available = room.playlist.filter(t => !room.usedTracks.includes(t.id) && !onTimelines.has(t.id));
+  if (!available.length) {
+    room.usedTracks = [];
+    room.playlist = shuffle(room.playlist);
+    available = room.playlist.filter(t => !onTimelines.has(t.id));
+  }
+  const track = available[0] || room.playlist[0];
+  room.usedTracks.push(track.id);
+  room.currentTrack = track;
+  room.roundAnswers = {};
+  room.stealAttempts = [];
+  room.roundTimelineSnapshot = null;
+  room.phase = 'round';
+  room.players.forEach(p => p.ready = false);
+
+  io.to(code).emit('room:state', getRoomState(room));
+  io.to(code).emit('round:start', {
+    trackId: track.id,
+    uri: track.uri,
+    preview_url: track.preview_url
+  });
+}
+
+function validYear(y) {
+  const n = parseInt(y);
+  return Number.isInteger(n) && n >= 1900 && n <= new Date().getFullYear() + 1 ? n : null;
 }
 
 // ─── Socket.io ────────────────────────────────────────────────────────────────
@@ -399,11 +584,26 @@ io.on('connection', socket => {
   socket.on('playlist:load', async ({ code, playlistId }) => {
     const room = rooms[code];
     if (!room || room.hostId !== socket.id) return;
+    const loadId = (room.playlistLoadId || 0) + 1;
+    room.playlistLoadId = loadId;
     try {
-      const tracks = await getPlaylistTracks(socket.id, playlistId);
+      // Tracks whose album years arrive in the background get shuffled into this room's playlist
+      const addBackgroundTracks = newTracks => {
+        const r = rooms[code];
+        if (!r || r.playlistLoadId !== loadId) return; // room gone or host loaded a different playlist
+        const known = new Set(r.playlist.map(t => t.id));
+        for (const t of newTracks) {
+          if (known.has(t.id)) continue;
+          r.playlist.splice(Math.floor(Math.random() * (r.playlist.length + 1)), 0, t);
+        }
+        const host = io.sockets.sockets.get(r.hostId);
+        if (host) host.emit('playlist:loaded', { count: r.playlist.length });
+      };
+      const tracks = await getPlaylistTracks(socket.id, playlistId, addBackgroundTracks);
       if (tracks.length < WIN_SCORE + 5) {
         return socket.emit('room:error', `Playlist needs at least ${WIN_SCORE + 5} tracks with release years.`);
       }
+      if (room.playlistLoadId !== loadId) return;
       room.playlist = shuffle(tracks);
       socket.emit('playlist:loaded', { count: tracks.length });
       io.to(code).emit('room:state', getRoomState(room));
@@ -425,99 +625,67 @@ io.on('connection', socket => {
     const room = rooms[code];
     if (!room || room.hostId !== socket.id) return;
     if (!room.playlist.length) return socket.emit('room:error', 'Load a playlist first');
+    clearStealTimer(room);
+    room.currentPlayerId = null;
+    room.cycleTurns = [];
+    room.winner = null;
     room.phase = 'playing';
     startRound(code);
   });
-
-  function startRound(code) {
-    const room = rooms[code];
-    if (!room) return;
-
-    const winner = room.players.find(p => p.timeline.length >= WIN_SCORE);
-    if (winner) {
-      room.phase = 'ended';
-      room.winner = winner.name;
-      io.to(code).emit('room:state', getRoomState(room));
-      return;
-    }
-
-    const available = room.playlist.filter(t => !room.usedTracks.includes(t.id));
-    if (!available.length) {
-      room.playlist = shuffle(room.playlist);
-      room.usedTracks = [];
-    }
-    const track = available[0] || room.playlist[0];
-    room.usedTracks.push(track.id);
-    room.currentTrack = track;
-    room.roundAnswers = {};
-    room.cardClaimed = null;
-    room.phase = 'round';
-    room.players.forEach(p => p.ready = false);
-    // Track whose turn it is (rotate through players)
-    const currentIdx = room.players.findIndex(p => p.id === room.currentPlayerId);
-    const nextIdx = (currentIdx + 1) % room.players.length;
-    room.currentPlayerId = room.players[nextIdx].id;
-
-    io.to(code).emit('room:state', getRoomState(room));
-    io.to(code).emit('round:start', {
-      trackId: track.id,
-      uri: track.uri,
-      preview_url: track.preview_url
-    });
-  }
 
   socket.on('round:answer', ({ code, year }) => {
     const room = rooms[code];
     if (!room || room.phase !== 'round') return;
     if (socket.id !== room.currentPlayerId) return; // only active player can answer
     const player = room.players.find(p => p.id === socket.id);
-    if (!player || player.ready) return;
+    const guess = parseInt(year);
+    if (!player || player.ready || !Number.isInteger(guess)) return;
 
-    room.roundAnswers[socket.id] = parseInt(year);
-    room.currentPlayerGuess = parseInt(year);
+    room.roundAnswers[socket.id] = guess;
+    room.currentPlayerGuess = guess;
     player.ready = true;
+    // Freeze the timeline everyone is judged against this round
+    room.roundTimelineSnapshot = sortByYear(player.timeline);
 
     // Open steal window — others can now spend tokens to steal
     room.phase = 'steal';
-    room.stealAttempts = {}; // track claimed gaps (gapIndex -> socketId)
+    room.stealAttempts = [];
 
     io.to(code).emit('room:state', getRoomState(room));
     io.to(code).emit('steal:window', {
-      guessedYear: room.currentPlayerGuess,
+      guessedYear: guess,
       activePlayerName: player.name,
-      activePlayerTimeline: [...player.timeline].sort((a, b) => a.year - b.year)
+      activePlayerTimeline: room.roundTimelineSnapshot
     });
 
     // Auto-advance to reveal after 15 seconds
+    clearStealTimer(room);
     room.stealTimeout = setTimeout(() => revealRound(code), 15000);
   });
 
-  // Any non-active player can spend 1 token to steal during steal phase
+  // Any non-active player can spend 1 token to steal during steal phase (one attempt each)
   socket.on('round:steal', ({ code, gapIndex }) => {
     const room = rooms[code];
     if (!room || room.phase !== 'steal') return;
     if (socket.id === room.currentPlayerId) return;
     const stealer = room.players.find(p => p.id === socket.id);
     if (!stealer) return;
+    const gap = parseInt(gapIndex);
+    const maxGap = (room.roundTimelineSnapshot || []).length;
+    if (!Number.isInteger(gap) || gap < 0 || gap > maxGap) return;
     if (stealer.tokens < 1) return socket.emit('room:error', 'Need 1 token to steal');
-    if (room.stealAttempts[gapIndex] !== undefined) return socket.emit('room:error', 'Someone already picked that gap');
-
-    const track = room.currentTrack;
-    const activePlayer = room.players.find(p => p.id === room.currentPlayerId);
-    const timeline = [...activePlayer.timeline].sort((a, b) => a.year - b.year);
-    const strictlyBefore = timeline.filter(t => t.year < track.year).length;
-    const strictlyAfter = timeline.filter(t => t.year > track.year).length;
-    const stealCorrect = gapIndex >= strictlyBefore && gapIndex <= (timeline.length - strictlyAfter);
+    if (room.stealAttempts.some(a => a.socketId === socket.id)) return socket.emit('room:error', 'You already made a steal this round');
+    if (room.stealAttempts.some(a => a.gapIndex === gap)) return socket.emit('room:error', 'Someone already picked that gap');
 
     stealer.tokens -= 1;
-    // Record attempt — correctness resolved at reveal, not here
-    // (we don't know if Player A was right until reveal)
-    room.stealAttempts[gapIndex] = { socketId: socket.id, correct: stealCorrect };
+    // Correctness is resolved at reveal (and re-resolved if the host overrides the year)
+    room.stealAttempts.push({ socketId: socket.id, gapIndex: gap });
 
+    const activePlayer = room.players.find(p => p.id === room.currentPlayerId);
     io.to(code).emit('steal:attempt', {
       stealerName: stealer.name,
-      targetName: activePlayer.name,
-      gapIndex
+      targetName: activePlayer?.name || 'Player',
+      gapIndex: gap
     });
     io.to(code).emit('room:state', getRoomState(room));
   });
@@ -527,56 +695,8 @@ io.on('connection', socket => {
     const room = rooms[code];
     if (!room || room.phase !== 'steal') return;
     if (socket.id !== room.hostId && socket.id !== room.currentPlayerId) return;
-    if (room.stealTimeout) { clearTimeout(room.stealTimeout); room.stealTimeout = null; }
     revealRound(code);
   });
-
-  function revealRound(code) {
-    const room = rooms[code];
-    if (!room || room.phase === 'reveal') return;
-    if (room.stealTimeout) { clearTimeout(room.stealTimeout); room.stealTimeout = null; }
-    room.phase = 'reveal';
-    const track = room.currentTrack;
-    const results = {};
-
-    // Step 1: check active player's guess — they win ties
-    const activePlayer = room.players.find(p => p.id === room.currentPlayerId);
-    let cardWinnerId = null;
-    if (activePlayer) {
-      const guessedYear = room.roundAnswers[activePlayer.id];
-      const timeline = [...activePlayer.timeline].sort((a, b) => a.year - b.year);
-      const strictlyBefore = timeline.filter(t => t.year < track.year).length;
-      const strictlyAfter = timeline.filter(t => t.year > track.year).length;
-      const beforeGuess = timeline.filter(t => t.year <= guessedYear).length;
-      const placementCorrect = beforeGuess >= strictlyBefore && beforeGuess <= (timeline.length - strictlyAfter);
-      if (placementCorrect) {
-        cardWinnerId = activePlayer.id;
-        activePlayer.timeline.push({ ...track });
-      }
-      results[activePlayer.id] = { name: activePlayer.name, guessedYear, placementCorrect, score: activePlayer.timeline.length };
-    }
-
-    // Step 2: if active player was wrong, find first correct steal (by gap insertion order)
-    if (!cardWinnerId && room.stealAttempts) {
-      for (const [gapIndex, attempt] of Object.entries(room.stealAttempts)) {
-        if (attempt.correct) {
-          const stealer = room.players.find(p => p.id === attempt.socketId);
-          if (stealer) {
-            cardWinnerId = stealer.id;
-            stealer.timeline.push({ ...track });
-            results[stealer.id] = { name: stealer.name, stolenCard: true, score: stealer.timeline.length };
-          }
-          break; // only first correct steal wins
-        }
-      }
-    }
-
-    io.to(code).emit('round:reveal', {
-      track: { id: track.id, name: track.name, artist: track.artist, year: track.year, uri: track.uri, preview_url: track.preview_url },
-      results
-    });
-    io.to(code).emit('room:state', getRoomState(room));
-  }
 
   // ─── Token management ────────────────────────────────────────────────────────
   socket.on('token:adjust', ({ code, playerId, delta }) => {
@@ -584,11 +704,11 @@ io.on('connection', socket => {
     if (!room || room.hostId !== socket.id) return;
     const player = room.players.find(p => p.id === playerId);
     if (!player) return;
-    player.tokens = Math.min(5, Math.max(0, player.tokens + delta));
+    player.tokens = Math.min(5, Math.max(0, player.tokens + (delta > 0 ? 1 : -1)));
     io.to(code).emit('room:state', getRoomState(room));
   });
 
-  // Active player spends 1 token to skip current song and move to next
+  // Active player spends 1 token to skip the current song — they keep their turn with a new song
   socket.on('round:skip', ({ code }) => {
     const room = rooms[code];
     if (!room || room.phase !== 'round') return;
@@ -596,9 +716,8 @@ io.on('connection', socket => {
     const player = room.players.find(p => p.id === socket.id);
     if (!player || player.tokens < 1) return socket.emit('room:error', 'Need 1 token to skip');
     player.tokens -= 1;
-    room.phase = 'playing';
     io.to(code).emit('token:skipped', { playerName: player.name });
-    startRound(code);
+    startRound(code, { keepPlayer: true });
   });
 
   // Active player spends 3 tokens for a free card — draws next track onto their timeline
@@ -610,8 +729,9 @@ io.on('connection', socket => {
     const player = room.players.find(p => p.id === socket.id);
     if (!player || player.tokens < 3) return socket.emit('room:error', 'Need 3 tokens for a free card');
 
-    // Pick a track not yet used and not the current one
-    const available = room.playlist.filter(t => !room.usedTracks.includes(t.id) && t.id !== room.currentTrack?.id);
+    const onTimelines = new Set(room.players.flatMap(p => p.timeline.map(c => c.id)));
+    const available = room.playlist.filter(t =>
+      !room.usedTracks.includes(t.id) && !onTimelines.has(t.id) && t.id !== room.currentTrack?.id);
     if (!available.length) return socket.emit('room:error', 'No more tracks available');
 
     player.tokens -= 3;
@@ -629,16 +749,22 @@ io.on('connection', socket => {
   socket.on('round:next', ({ code }) => {
     const room = rooms[code];
     if (!room || room.hostId !== socket.id) return;
-    room.phase = 'playing';
+    if (!['reveal', 'round', 'steal'].includes(room.phase)) return;
+    clearStealTimer(room); // otherwise a pending steal timer could reveal the NEXT round
     startRound(code);
   });
 
   socket.on('game:restart', ({ code }) => {
     const room = rooms[code];
     if (!room || room.hostId !== socket.id) return;
+    clearStealTimer(room);
     room.players.forEach(p => { p.timeline = []; p.ready = false; p.tokens = 2; });
     room.usedTracks = [];
     room.currentTrack = null;
+    room.currentPlayerId = null;
+    room.cycleTurns = [];
+    room.stealAttempts = [];
+    room.roundTimelineSnapshot = null;
     room.winner = null;
     room.roundAnswers = {};
     room.playlist = shuffle(room.playlist);
@@ -653,13 +779,14 @@ io.on('connection', socket => {
     const room = rooms[code];
     if (!room || room.hostId !== socket.id) return;
     const player = room.players.find(p => p.id === playerId);
-    if (!player) return;
-    // card = { name, artist, year }
+    if (!player || !card) return;
+    const year = validYear(card.year);
+    if (!year) return socket.emit('room:error', 'Invalid year');
     const newCard = {
-      id: 'manual-' + Date.now(),
-      name: card.name || 'Unknown',
-      artist: card.artist || '',
-      year: parseInt(card.year),
+      id: 'manual-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+      name: String(card.name || 'Unknown').slice(0, 200),
+      artist: String(card.artist || '').slice(0, 200),
+      year,
       uri: null,
       preview_url: null,
       manual: true
@@ -669,7 +796,7 @@ io.on('connection', socket => {
     io.to(code).emit('cards:updated', { playerId, timeline: player.timeline });
   });
 
-  // Remove a card from a player's timeline by card id or index
+  // Remove a card from a player's timeline by card id
   socket.on('card:remove', ({ code, playerId, cardId }) => {
     const room = rooms[code];
     if (!room || room.hostId !== socket.id) return;
@@ -680,43 +807,27 @@ io.on('connection', socket => {
     io.to(code).emit('cards:updated', { playerId, timeline: player.timeline });
   });
 
-  // Override the year of the current round's track and re-evaluate who got the card
+  // Override the year of the current round's track and re-score the whole round (guess + steals)
   socket.on('round:override_year', ({ code, correctYear }) => {
     const room = rooms[code];
     if (!room || room.hostId !== socket.id) return;
     if (room.phase !== 'reveal') return;
     const track = room.currentTrack;
     if (!track) return;
-    const oldYear = track.year;
-    track.year = parseInt(correctYear);
+    const year = validYear(correctYear);
+    if (!year) return socket.emit('room:error', 'Invalid year');
+    track.year = year;
 
     // Also update albumCache so future loads use the correct year
-    if (track.albumId) albumCache[track.albumId] = track.year;
+    if (track.albumId) {
+      albumCache[track.albumId] = track.year;
+      // Other songs from the same album share the bad date — fix them in this room too
+      room.playlist.forEach(t => { if (t.albumId === track.albumId) t.year = track.year; });
+    }
     saveCache(albumCache);
 
-    // Re-evaluate all players: remove this round's card entirely, then re-award if correct
-    const results = {};
-    room.players.forEach(p => {
-      // Always strip any version of this card first (old year, new year, any year)
-      p.timeline = p.timeline.filter(c => c.id !== track.id);
-
-      // Re-check placement with corrected year
-      const timeline = [...p.timeline].sort((a, b) => a.year - b.year);
-      const guessedYear = room.roundAnswers[p.id];
-      if (guessedYear === undefined) return;
-      const strictlyBefore = timeline.filter(t => t.year < track.year).length;
-      const strictlyAfter = timeline.filter(t => t.year > track.year).length;
-      const beforeGuess = timeline.filter(t => t.year <= guessedYear).length;
-      const placementCorrect = beforeGuess >= strictlyBefore && beforeGuess <= (timeline.length - strictlyAfter);
-      if (placementCorrect) p.timeline.push({ ...track });
-      results[p.id] = { name: p.name, guessedYear, placementCorrect, score: p.timeline.length };
-    });
-
-    io.to(code).emit('round:reveal', {
-      track: { ...track },
-      results,
-      yearOverridden: true
-    });
+    const results = scoreRound(room);
+    io.to(code).emit('round:reveal', revealPayload(track, results, { yearOverridden: true }));
     io.to(code).emit('room:state', getRoomState(room));
   });
 
@@ -725,12 +836,21 @@ io.on('connection', socket => {
       const room = rooms[code];
       const idx = room.players.findIndex(p => p.id === socket.id);
       if (idx !== -1) {
+        const wasActive = room.currentPlayerId === socket.id;
         room.players.splice(idx, 1);
         if (room.players.length === 0) {
+          clearStealTimer(room);
           delete rooms[code];
         } else {
           if (room.hostId === socket.id) room.hostId = room.players[0].id;
-          io.to(code).emit('room:state', getRoomState(room));
+          if (wasActive && ['round', 'steal'].includes(room.phase)) {
+            // Active player left mid-turn — don't stall the game; pass the turn on.
+            // Point "current" at the previous seat so the rotation continues from the leaver's spot.
+            room.currentPlayerId = room.players[(idx - 1 + room.players.length) % room.players.length].id;
+            startRound(code);
+          } else {
+            io.to(code).emit('room:state', getRoomState(room));
+          }
         }
       }
     }
@@ -744,8 +864,21 @@ async function start() {
   await initRedis();
   const redisCache = await loadCacheFromRedis();
   if (redisCache) {
-    Object.assign(albumCache, redisCache);
+    Object.assign(albumCache, redisCache); // Redis wins conflicts (it holds year overrides)
     console.log(`Merged Redis cache: ${Object.keys(albumCache).length} total albums`);
+  }
+  // Seed Redis with anything the file cache knows that Redis doesn't (e.g. the committed album-cache.json)
+  if (redisClient) {
+    const redisCount = redisCache ? Object.keys(redisCache).length : 0;
+    const mergedCount = Object.keys(albumCache).length;
+    if (mergedCount > redisCount) {
+      try {
+        await redisClient.set(REDIS_CACHE_KEY, JSON.stringify(albumCache));
+        console.log(`Seeded Redis cache: ${redisCount} → ${mergedCount} albums`);
+      } catch (err) {
+        console.error('Redis seed error:', err.message);
+      }
+    }
   }
 
   httpServer.listen(PORT, () => {

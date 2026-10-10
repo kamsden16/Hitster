@@ -114,7 +114,7 @@ Send friends `https://192.168.1.50:3443` — they'll see a browser security warn
 6. Once someone reaches **10 cards**, the round finishes so everyone gets an equal number of turns. The outright leader at that point wins; if the top is tied, play another full round until someone leads.
 
 ### Rejoining after a disconnect
-Phone locked or page refreshed? Just reopen the game — your browser remembers the room and rejoins automatically, keeping your timeline and tokens. If it doesn't (different browser, cleared storage), join again with the **same name and room code** and you get your seat back. Seats are held for 5 minutes. If the active player stays offline for 30 seconds their turn passes, and if the host does, another connected player becomes host.
+Phone locked or page refreshed? Just reopen the game — your browser remembers the room and rejoins automatically, keeping your timeline and tokens. If it doesn't (different browser, cleared storage), join again with the **same name and room code** and you get your seat back. Seats are held for 5 minutes. If the active player drops mid-turn, the song plays out and then the host is asked whether to skip their turn or keep waiting. If the host stays offline for 30 seconds, another connected player becomes host.
 
 ### Scoring example
 If your timeline has songs from 1975 and 1995, and the new song is from 1983:

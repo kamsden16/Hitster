@@ -504,21 +504,39 @@ function destroyRoom(code) {
   delete rooms[code];
 }
 
-// If the active player is offline during the guess phase, give them a grace period, then move on.
+// If the active player is offline during the guess phase, let the song play out (TURN_GRACE_MS),
+// then ask the host whether to skip their turn or keep waiting. Never skips on its own.
 // Safe to call any time: it re-evaluates from scratch.
 function watchActivePlayer(code) {
   const room = rooms[code];
   if (!room) return;
   clearTurnTimer(room);
   const active = room.players.find(p => p.id === room.currentPlayerId);
-  if (room.phase !== 'round' || !active || active.connected !== false) return;
-  if (!room.players.some(p => p.connected !== false)) return; // nobody here to play on
+  const absent = room.phase === 'round' && active && active.connected === false;
+  if (!absent) {
+    // Player is back (or the round moved on) — withdraw any pending question
+    if (room.absentPrompt) io.to(code).emit('turn:absent_cleared');
+    room.absentPrompt = null;
+    room.hostWaiting = null;
+    return;
+  }
+  if (room.absentPrompt || room.hostWaiting === active.id) return; // already asked / host chose to wait
+  if (!room.players.some(p => p.connected !== false)) return; // nobody here to ask
   room.turnTimer = setTimeout(() => {
     room.turnTimer = null;
     if (rooms[code] !== room || room.phase !== 'round') return;
     const still = room.players.find(p => p.id === room.currentPlayerId);
-    if (still && still.connected === false) startRound(code);
+    if (!still || still.connected !== false) return;
+    room.absentPrompt = still.id;
+    promptHostAbsent(room);
   }, TURN_GRACE_MS);
+}
+
+function promptHostAbsent(room) {
+  if (!room.absentPrompt) return;
+  const absent = room.players.find(p => p.id === room.absentPrompt);
+  const host = io.sockets.sockets.get(room.hostId);
+  if (absent && host) host.emit('turn:absent', { playerName: absent.name });
 }
 
 // Release a seat for good (offline too long)
@@ -557,6 +575,7 @@ function markDisconnected(code, player) {
       if (next) {
         room.hostId = next.id;
         io.to(code).emit('room:state', getRoomState(room));
+        promptHostAbsent(room);
       }
     }, HOST_GRACE_MS);
   }
@@ -624,6 +643,7 @@ function rejoinPlayer(socket, room, player) {
   io.to(code).emit('room:state', getRoomState(room));
   resyncPlayer(socket, room);
   watchActivePlayer(code);
+  if (room.hostId === socket.id) promptHostAbsent(room);
   console.log(`Rejoined: ${player.name} → ${code}`);
 
   if (carriedTokens) {
@@ -651,6 +671,8 @@ function startRound(code, { keepPlayer = false } = {}) {
   if (!room || !room.players.length) return;
   clearStealTimer(room);
   clearTurnTimer(room);
+  room.absentPrompt = null;
+  room.hostWaiting = null;
   room.lastReveal = null;
   room.cycleTurns = room.cycleTurns || [];
 
@@ -875,6 +897,18 @@ io.on('connection', socket => {
     if (!room || room.phase !== 'steal') return;
     if (socket.id !== room.hostId && socket.id !== room.currentPlayerId) return;
     revealRound(code);
+  });
+
+  // Host's answer to "active player is offline — skip them or keep waiting?"
+  socket.on('turn:absent_decision', ({ code, action }) => {
+    const room = rooms[code];
+    if (!room || room.hostId !== socket.id || room.phase !== 'round' || !room.absentPrompt) return;
+    const absentId = room.absentPrompt;
+    const still = room.players.find(p => p.id === absentId);
+    room.absentPrompt = null;
+    if (!still || still.connected !== false || room.currentPlayerId !== absentId) return; // they came back meanwhile
+    if (action === 'skip') startRound(code);
+    else room.hostWaiting = absentId; // keep waiting; no more prompts until they return or the host moves on
   });
 
   // ─── Token management ────────────────────────────────────────────────────────

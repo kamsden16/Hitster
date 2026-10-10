@@ -105,6 +105,7 @@ socket.on('round:start', ({ trackId, uri, preview_url }) => {
   state.hasSubmitted = false;
   state.guessedYear = 1990;
   state.isMyTurn = state.roomState?.currentPlayerId === state.playerId;
+  hideAbsentPrompt();
   startRound(uri, preview_url);
 });
 
@@ -146,6 +147,35 @@ socket.on('playlist:progress', ({ loaded, total, hasMore, background, done }) =>
     label.textContent = `Loading album years… ${loaded}/${total}`;
   }
 });
+
+// ─── Active player offline: host decides ─────────────────────────────────────────
+function hideAbsentPrompt() {
+  document.getElementById('absent-prompt')?.remove();
+}
+
+socket.on('turn:absent', ({ playerName }) => {
+  hideAbsentPrompt();
+  const box = document.createElement('div');
+  box.id = 'absent-prompt';
+  box.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:1000;max-width:92vw;' +
+    'background:var(--surface,#222);color:var(--text,#fff);border:1px solid var(--border,#555);border-radius:12px;' +
+    'padding:12px 16px;box-shadow:0 4px 20px rgba(0,0,0,.5);text-align:center;';
+  box.innerHTML = `<div style="margin-bottom:8px;">💤 <b>${esc(playerName)}</b> is offline. Skip their turn?</div>`;
+  const answer = action => {
+    socket.emit('turn:absent_decision', { code: state.roomCode, action });
+    hideAbsentPrompt();
+  };
+  [['Skip their turn', 'skip'], ['Keep waiting', 'wait']].forEach(([label, action]) => {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm ' + (action === 'skip' ? 'btn-primary' : 'btn-secondary');
+    btn.style.margin = '0 4px';
+    btn.textContent = label;
+    btn.addEventListener('click', () => answer(action));
+    box.appendChild(btn);
+  });
+  document.body.appendChild(box);
+});
+socket.on('turn:absent_cleared', hideAbsentPrompt);
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 async function spotifyLogout() {

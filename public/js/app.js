@@ -25,6 +25,18 @@ function esc(v) {
   return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ─── Saved session (lets a refresh / phone lock / dropped connection rejoin the same seat) ──
+const SESSION_KEY = 'hitster:session';
+function loadSession() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY)) || null; } catch { return null; }
+}
+function saveSession(s) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch {}
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch {}
+}
+
 // ─── Screen management ───────────────────────────────────────────────────────
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -34,21 +46,43 @@ function showScreen(id) {
 // ─── Socket Events ────────────────────────────────────────────────────────────
 socket.on('connect', () => {
   state.socketId = socket.id;
+  // Every (re)connection is a brand-new socket — ask for our old seat back if we had one
+  const session = loadSession();
+  if (session?.code && session?.name) {
+    state.playerName = session.name;
+    socket.emit('room:join', { code: session.code, playerName: session.name, rejoinToken: session.token, auto: true });
+  }
+});
+
+// The room is gone (server restarted, or our seat was released) — forget it and start over
+socket.on('room:rejoin_failed', () => {
+  clearSession();
+  state.roomCode = null;
+  state.playerId = null;
+  state.roomState = null;
+  showScreen(state.accessToken ? 'screen-lobby' : 'screen-auth');
 });
 
 socket.on('auth:success', ({ access_token, display_name }) => {
   state.accessToken = access_token;
-  state.playerName = display_name;
   document.getElementById('player-name-badge').textContent = display_name;
+  // When this fires on a rejoin we're already in a room — don't yank the player back to the lobby
+  if (!state.roomCode) {
+    state.playerName = display_name;
+    showScreen('screen-lobby');
+  }
   initSpotifyPlayer(access_token);
-  showScreen('screen-lobby');
 });
 
-socket.on('room:joined', ({ code, playerId }) => {
+socket.on('room:joined', ({ code, playerId, rejoinToken, rejoined }) => {
   state.roomCode = code;
   state.playerId = playerId;
+  if (state.playerName) saveSession({ code, name: state.playerName, token: rejoinToken });
   document.getElementById('room-code-display').textContent = code;
-  showScreen('screen-room');
+  // A reconnect mid-game keeps whatever screen we're already on; the server resyncs the phase right after
+  const inGame = ['screen-game', 'screen-reveal', 'screen-winner'].some(id =>
+    document.getElementById(id).classList.contains('active'));
+  if (!(rejoined && inGame)) showScreen('screen-room');
 });
 
 socket.on('room:state', (roomState) => {
@@ -151,7 +185,7 @@ socket.on('token:skipped', ({ playerName }) => {
   document.getElementById('player-status').textContent = `${playerName} skipped — new song coming…`;
 });
 
-socket.on('steal:window', ({ guessedYear, activePlayerName, activePlayerTimeline }) => {
+socket.on('steal:window', ({ guessedYear, activePlayerName, activePlayerTimeline, alreadyStole }) => {
   state.isMyTurn = state.roomState?.currentPlayerId === state.playerId;
   const me = state.roomState?.players?.find(p => p.id === state.playerId);
   const myTokens = me?.tokens || 0;
@@ -193,7 +227,7 @@ socket.on('steal:window', ({ guessedYear, activePlayerName, activePlayerTimeline
     document.getElementById('guess-panel').insertBefore(infoEl, document.getElementById('guess-panel').firstChild);
 
     // Show steal button if they have tokens
-    if (myTokens >= 1) {
+    if (myTokens >= 1 && !alreadyStole) {
       state.stealTimeline = activePlayerTimeline; // store for gap builder
       document.getElementById('btn-attempt-steal').classList.remove('hidden');
     }
@@ -276,7 +310,7 @@ function updateRoomUI(roomState) {
     const isMe = p.id === state.playerId;
     const tokenPips = Array(p.tokens || 0).fill('🪙').join('');
     li.innerHTML = `
-      <span>${esc(p.name)}${isMe ? ' (you)' : ''}${p.isHost ? ' <span class="player-host-badge">HOST</span>' : ''}</span>
+      <span>${esc(p.name)}${isMe ? ' (you)' : ''}${p.connected === false ? ' 💤 offline' : ''}${p.isHost ? ' <span class="player-host-badge">HOST</span>' : ''}</span>
       <span class="player-score-badge">${p.score} 🎵 ${tokenPips}</span>
     `;
     list.appendChild(li);
@@ -383,7 +417,7 @@ function updateTimeline(roomState) {
     const tokenStr = `🪙${p.tokens || 0}`;
     const turnMark = isCurrentTurn ? ' 🎵' : '';
     li.innerHTML = `
-      <span class="gpl-name">${esc(p.name)}${turnMark}</span>
+      <span class="gpl-name">${esc(p.name)}${p.connected === false ? ' 💤' : ''}${turnMark}</span>
       <span class="gpl-score">${p.score}🃏</span>
       <span class="gpl-tokens">${tokenStr}</span>
     `;

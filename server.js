@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const fs = require('fs');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 const axios = require('axios');
 const path = require('path');
@@ -20,6 +21,10 @@ const io = new Server(httpServer, {
 const PORT = parseInt(process.env.PORT || '3000');
 const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
 const WIN_SCORE = parseInt(process.env.WIN_SCORE || '10');
+// How long a disconnected player is held before the game moves on / their seat is released
+const TURN_GRACE_MS = parseInt(process.env.TURN_GRACE_MS || '30000');   // active player gone mid-turn
+const HOST_GRACE_MS = parseInt(process.env.HOST_GRACE_MS || '30000');   // host gone → promote someone
+const REMOVE_AFTER_MS = parseInt(process.env.REMOVE_AFTER_MS || String(5 * 60 * 1000)); // seat released
 const CACHE_FILE = path.join(__dirname, 'album-cache.json');
 
 // ─── Album year cache ─────────────────────────────────────────────────────────
@@ -143,6 +148,7 @@ app.get('/auth/callback', async (req, res) => {
     const profileRes = await axios.get('https://api.spotify.com/v1/me', {
       headers: { Authorization: `Bearer ${access_token}` }
     });
+    if (userTokens[socketId]) userTokens[socketId].display_name = profileRes.data.display_name;
 
     const socket = io.sockets.sockets.get(socketId);
     if (socket) {
@@ -376,6 +382,7 @@ function getRoomState(room) {
       score: p.timeline.length,
       isHost: p.id === room.hostId,
       ready: p.ready,
+      connected: p.connected !== false,
       tokens: p.tokens,
       timeline: [...p.timeline].sort((a, b) => a.year - b.year)
     })),
@@ -469,6 +476,183 @@ function clearStealTimer(room) {
   if (room.stealTimeout) { clearTimeout(room.stealTimeout); room.stealTimeout = null; }
 }
 
+function clearTurnTimer(room) {
+  if (room.turnTimer) { clearTimeout(room.turnTimer); room.turnTimer = null; }
+}
+
+function roundStartPayload(track) {
+  return { trackId: track.id, uri: track.uri, preview_url: track.preview_url };
+}
+
+// ─── Player presence / rejoin ─────────────────────────────────────────────────
+// A disconnected player keeps their seat, timeline and tokens. They come back by joining the
+// same room with the same name; their id is re-pointed at the new socket (see rebindPlayer),
+// so the rest of the game keeps working off player.id === socket.id.
+const normName = n => String(n || '').trim().toLowerCase();
+
+function clearPlayerTimers(player) {
+  if (player.removeTimer) { clearTimeout(player.removeTimer); player.removeTimer = null; }
+  if (player.hostTimer) { clearTimeout(player.hostTimer); player.hostTimer = null; }
+}
+
+function destroyRoom(code) {
+  const room = rooms[code];
+  if (!room) return;
+  clearStealTimer(room);
+  clearTurnTimer(room);
+  room.players.forEach(clearPlayerTimers);
+  delete rooms[code];
+}
+
+// If the active player is offline during the guess phase, let the song play out (TURN_GRACE_MS),
+// then ask the host whether to skip their turn or keep waiting. Never skips on its own.
+// Safe to call any time: it re-evaluates from scratch.
+function watchActivePlayer(code) {
+  const room = rooms[code];
+  if (!room) return;
+  clearTurnTimer(room);
+  const active = room.players.find(p => p.id === room.currentPlayerId);
+  const absent = room.phase === 'round' && active && active.connected === false;
+  if (!absent) {
+    // Player is back (or the round moved on) — withdraw any pending question
+    if (room.absentPrompt) io.to(code).emit('turn:absent_cleared');
+    room.absentPrompt = null;
+    room.hostWaiting = null;
+    return;
+  }
+  if (room.absentPrompt || room.hostWaiting === active.id) return; // already asked / host chose to wait
+  if (!room.players.some(p => p.connected !== false)) return; // nobody here to ask
+  room.turnTimer = setTimeout(() => {
+    room.turnTimer = null;
+    if (rooms[code] !== room || room.phase !== 'round') return;
+    const still = room.players.find(p => p.id === room.currentPlayerId);
+    if (!still || still.connected !== false) return;
+    room.absentPrompt = still.id;
+    promptHostAbsent(room);
+  }, TURN_GRACE_MS);
+}
+
+function promptHostAbsent(room) {
+  if (!room.absentPrompt) return;
+  const absent = room.players.find(p => p.id === room.absentPrompt);
+  const host = io.sockets.sockets.get(room.hostId);
+  if (absent && host) host.emit('turn:absent', { playerName: absent.name });
+}
+
+// Release a seat for good (offline too long)
+function removePlayer(code, player) {
+  const room = rooms[code];
+  if (!room) return;
+  const idx = room.players.indexOf(player);
+  if (idx === -1) return;
+  clearPlayerTimers(player);
+  const wasActive = room.currentPlayerId === player.id;
+  const wasHost = room.hostId === player.id;
+  room.players.splice(idx, 1);
+  delete userTokens[player.id];
+  if (room.players.length === 0) return destroyRoom(code);
+  if (wasHost) room.hostId = (room.players.find(p => p.connected !== false) || room.players[0]).id;
+  if (wasActive && ['round', 'steal'].includes(room.phase)) {
+    // Point "current" at the previous seat so the rotation continues from the leaver's spot.
+    room.currentPlayerId = room.players[(idx - 1 + room.players.length) % room.players.length].id;
+    startRound(code);
+  } else {
+    io.to(code).emit('room:state', getRoomState(room));
+  }
+}
+
+function markDisconnected(code, player) {
+  const room = rooms[code];
+  player.connected = false;
+  clearPlayerTimers(player);
+  player.removeTimer = setTimeout(() => removePlayer(code, player), REMOVE_AFTER_MS);
+  if (room.hostId === player.id) {
+    // Don't leave the room without a working host for long
+    player.hostTimer = setTimeout(() => {
+      player.hostTimer = null;
+      if (rooms[code] !== room || room.hostId !== player.id || player.connected !== false) return;
+      const next = room.players.find(p => p.connected !== false);
+      if (next) {
+        room.hostId = next.id;
+        io.to(code).emit('room:state', getRoomState(room));
+        promptHostAbsent(room);
+      }
+    }, HOST_GRACE_MS);
+  }
+  watchActivePlayer(code);
+  io.to(code).emit('room:state', getRoomState(room));
+}
+
+// Re-point every reference to the player's old socket id at their new one.
+// Returns true if Spotify tokens were carried over to the new socket.
+function rebindPlayer(room, player, newId) {
+  const oldId = player.id;
+  if (oldId === newId) return false;
+  player.id = newId;
+  if (room.hostId === oldId) room.hostId = newId;
+  if (room.currentPlayerId === oldId) room.currentPlayerId = newId;
+  room.cycleTurns = (room.cycleTurns || []).map(id => (id === oldId ? newId : id));
+  if (room.roundAnswers && oldId in room.roundAnswers) {
+    room.roundAnswers[newId] = room.roundAnswers[oldId];
+    delete room.roundAnswers[oldId];
+  }
+  (room.stealAttempts || []).forEach(a => { if (a.socketId === oldId) a.socketId = newId; });
+  // Spotify tokens follow the player — unless they've already logged in on the new socket
+  let carried = false;
+  if (!userTokens[newId] && userTokens[oldId]) { userTokens[newId] = userTokens[oldId]; carried = true; }
+  delete userTokens[oldId];
+  return carried;
+}
+
+// Bring a returning player's screen up to date with the phase the room is in
+function resyncPlayer(socket, room) {
+  const track = room.currentTrack;
+  if (['round', 'steal'].includes(room.phase) && track) {
+    socket.emit('round:start', roundStartPayload(track));
+  }
+  if (room.phase === 'steal') {
+    const active = room.players.find(p => p.id === room.currentPlayerId);
+    socket.emit('steal:window', {
+      guessedYear: room.currentPlayerGuess,
+      activePlayerName: active?.name || 'Player',
+      activePlayerTimeline: room.roundTimelineSnapshot || [],
+      alreadyStole: (room.stealAttempts || []).some(a => a.socketId === socket.id)
+    });
+  } else if (room.phase === 'reveal' && room.lastReveal) {
+    socket.emit('round:reveal', room.lastReveal);
+  }
+}
+
+function rejoinPlayer(socket, room, player) {
+  const code = room.code;
+  clearPlayerTimers(player);
+  const oldId = player.id;
+  let carriedTokens = false;
+  if (oldId !== socket.id) {
+    // Re-point first so the stale socket's eventual disconnect finds nobody to mark offline
+    carriedTokens = rebindPlayer(room, player, socket.id);
+    const stale = io.sockets.sockets.get(oldId);
+    if (stale) {
+      stale.leave(code);
+      stale.emit('room:error', 'You joined this game from another device or tab');
+    }
+  }
+  player.connected = true;
+  socket.join(code);
+  socket.emit('room:joined', { code, playerId: socket.id, rejoinToken: player.rejoinToken, rejoined: true });
+  io.to(code).emit('room:state', getRoomState(room));
+  resyncPlayer(socket, room);
+  watchActivePlayer(code);
+  if (room.hostId === socket.id) promptHostAbsent(room);
+  console.log(`Rejoined: ${player.name} → ${code}`);
+
+  if (carriedTokens) {
+    refreshToken(socket.id).then(access_token => {
+      if (access_token) socket.emit('auth:success', { access_token, display_name: userTokens[socket.id]?.display_name || player.name });
+    });
+  }
+}
+
 function revealRound(code) {
   const room = rooms[code];
   // Only a live steal window can be revealed — guards against a stale timer firing in a later round
@@ -476,7 +660,8 @@ function revealRound(code) {
   clearStealTimer(room);
   room.phase = 'reveal';
   const results = scoreRound(room);
-  io.to(code).emit('round:reveal', revealPayload(room.currentTrack, results));
+  room.lastReveal = revealPayload(room.currentTrack, results);
+  io.to(code).emit('round:reveal', room.lastReveal);
   io.to(code).emit('room:state', getRoomState(room));
 }
 
@@ -485,6 +670,10 @@ function startRound(code, { keepPlayer = false } = {}) {
   const room = rooms[code];
   if (!room || !room.players.length) return;
   clearStealTimer(room);
+  clearTurnTimer(room);
+  room.absentPrompt = null;
+  room.hostWaiting = null;
+  room.lastReveal = null;
   room.cycleTurns = room.cycleTurns || [];
 
   if (!keepPlayer || !room.players.some(p => p.id === room.currentPlayerId)) {
@@ -530,11 +719,8 @@ function startRound(code, { keepPlayer = false } = {}) {
   room.players.forEach(p => p.ready = false);
 
   io.to(code).emit('room:state', getRoomState(room));
-  io.to(code).emit('round:start', {
-    trackId: track.id,
-    uri: track.uri,
-    preview_url: track.preview_url
-  });
+  io.to(code).emit('round:start', roundStartPayload(track));
+  watchActivePlayer(code);
 }
 
 function validYear(y) {
@@ -560,19 +746,34 @@ io.on('connection', socket => {
       roundAnswers: {}
     };
     socket.join(code);
-    rooms[code].players.push({ id: socket.id, name: playerName, timeline: [], ready: false, tokens: 2 });
-    socket.emit('room:joined', { code, playerId: socket.id });
+    const rejoinToken = crypto.randomBytes(12).toString('hex');
+    rooms[code].players.push({ id: socket.id, name: playerName, timeline: [], ready: false, tokens: 2, connected: true, rejoinToken });
+    socket.emit('room:joined', { code, playerId: socket.id, rejoinToken });
     io.to(code).emit('room:state', getRoomState(rooms[code]));
   });
 
-  socket.on('room:join', ({ code, playerName }) => {
+  // Joins a room — or, if a player with this name is offline in it (or this is their own session
+  // token), takes that seat back with timeline and tokens intact. `auto` = silent reconnect by the client.
+  socket.on('room:join', ({ code, playerName, rejoinToken, auto }) => {
+    code = String(code || '').trim().toUpperCase();
+    const fail = msg => socket.emit(auto ? 'room:rejoin_failed' : 'room:error', msg);
     const room = rooms[code];
-    if (!room) return socket.emit('room:error', 'Room not found');
-    if (room.phase !== 'lobby') return socket.emit('room:error', 'Game already in progress');
+    if (!room) return fail('Room not found');
     if (room.players.find(p => p.id === socket.id)) return;
+
+    const sameName = room.players.filter(p => normName(p.name) === normName(playerName));
+    const seat = sameName.find(p => rejoinToken && p.rejoinToken === rejoinToken)
+      || sameName.find(p => p.connected === false);
+    if (seat) return rejoinPlayer(socket, room, seat);
+
+    if (auto) return fail('Your seat is gone');
+    if (room.phase !== 'lobby') {
+      return fail(sameName.length ? 'That name is already connected' : 'Game already in progress');
+    }
     socket.join(code);
-    room.players.push({ id: socket.id, name: playerName, timeline: [], ready: false, tokens: 2 });
-    socket.emit('room:joined', { code, playerId: socket.id });
+    const token = crypto.randomBytes(12).toString('hex');
+    room.players.push({ id: socket.id, name: playerName, timeline: [], ready: false, tokens: 2, connected: true, rejoinToken: token });
+    socket.emit('room:joined', { code, playerId: socket.id, rejoinToken: token });
     io.to(code).emit('room:state', getRoomState(room));
   });
 
@@ -696,6 +897,18 @@ io.on('connection', socket => {
     if (!room || room.phase !== 'steal') return;
     if (socket.id !== room.hostId && socket.id !== room.currentPlayerId) return;
     revealRound(code);
+  });
+
+  // Host's answer to "active player is offline — skip them or keep waiting?"
+  socket.on('turn:absent_decision', ({ code, action }) => {
+    const room = rooms[code];
+    if (!room || room.hostId !== socket.id || room.phase !== 'round' || !room.absentPrompt) return;
+    const absentId = room.absentPrompt;
+    const still = room.players.find(p => p.id === absentId);
+    room.absentPrompt = null;
+    if (!still || still.connected !== false || room.currentPlayerId !== absentId) return; // they came back meanwhile
+    if (action === 'skip') startRound(code);
+    else room.hostWaiting = absentId; // keep waiting; no more prompts until they return or the host moves on
   });
 
   // ─── Token management ────────────────────────────────────────────────────────
@@ -827,34 +1040,21 @@ io.on('connection', socket => {
     saveCache(albumCache);
 
     const results = scoreRound(room);
-    io.to(code).emit('round:reveal', revealPayload(track, results, { yearOverridden: true }));
+    room.lastReveal = revealPayload(track, results, { yearOverridden: true });
+    io.to(code).emit('round:reveal', room.lastReveal);
     io.to(code).emit('room:state', getRoomState(room));
   });
 
   socket.on('disconnect', () => {
+    let inRoom = false;
     for (const code in rooms) {
-      const room = rooms[code];
-      const idx = room.players.findIndex(p => p.id === socket.id);
-      if (idx !== -1) {
-        const wasActive = room.currentPlayerId === socket.id;
-        room.players.splice(idx, 1);
-        if (room.players.length === 0) {
-          clearStealTimer(room);
-          delete rooms[code];
-        } else {
-          if (room.hostId === socket.id) room.hostId = room.players[0].id;
-          if (wasActive && ['round', 'steal'].includes(room.phase)) {
-            // Active player left mid-turn — don't stall the game; pass the turn on.
-            // Point "current" at the previous seat so the rotation continues from the leaver's spot.
-            room.currentPlayerId = room.players[(idx - 1 + room.players.length) % room.players.length].id;
-            startRound(code);
-          } else {
-            io.to(code).emit('room:state', getRoomState(room));
-          }
-        }
-      }
+      const player = rooms[code].players.find(p => p.id === socket.id);
+      if (!player) continue;
+      inRoom = true;
+      // Keep the seat (and Spotify tokens) so they can rejoin; the game moves on if it has to
+      markDisconnected(code, player);
     }
-    delete userTokens[socket.id];
+    if (!inRoom) delete userTokens[socket.id];
   });
 });
 

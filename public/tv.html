@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HITSTER — TV Display</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,300;0,400;0,600;1,300&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+<link rel="stylesheet" href="/css/tv.css">
+</head>
+<body class="tv-page">
+
+  <!-- Spotify login (the laptop plays the music, so it needs a Premium login) -->
+  <section id="tv-login" class="tv-screen active">
+    <div class="tv-center">
+      <div class="logo">HITSTER</div>
+      <p class="tv-sub">TV display</p>
+      <button id="btn-tv-login" class="btn btn-spotify tv-btn">Connect Spotify (Premium)</button>
+      <p class="note">This screen plays the music for everyone. Players don't need Spotify.</p>
+      <p id="tv-login-warn" class="tv-warn hidden"></p>
+    </div>
+  </section>
+
+  <!-- Enter room code -->
+  <section id="tv-attach" class="tv-screen">
+    <div class="tv-center">
+      <div class="logo">HITSTER</div>
+      <p class="tv-sub">Enter the room code from the host's phone</p>
+      <input id="tv-code-input" class="input-field code-input tv-code-input" maxlength="5" placeholder="ABCDE" autocomplete="off">
+      <button id="btn-tv-attach" class="btn btn-primary tv-btn">Connect to room</button>
+      <p id="tv-attach-error" class="tv-warn hidden"></p>
+    </div>
+  </section>
+
+  <!-- Lobby -->
+  <section id="tv-lobby" class="tv-screen">
+    <div class="tv-lobby-grid">
+      <div class="tv-join-card">
+        <p class="tv-sub">Join on your phone</p>
+        <div id="tv-join-url" class="tv-join-url"></div>
+        <div class="tv-code" id="tv-room-code"></div>
+        <img id="tv-qr" class="tv-qr" alt="QR code to join">
+      </div>
+      <div class="tv-lobby-side">
+        <h2>Players</h2>
+        <ul id="tv-players" class="tv-players"></ul>
+        <div class="tv-setup">
+          <h3>Music</h3>
+          <button id="btn-tv-audio" class="btn btn-primary tv-btn">🔊 Tap to enable audio</button>
+          <p id="tv-audio-status" class="tv-status">Starting Spotify player…</p>
+          <div id="tv-playlist-box">
+            <button id="btn-tv-playlists" class="btn btn-secondary">Browse my playlists</button>
+            <div id="tv-playlists" class="tv-playlists hidden"></div>
+            <div class="input-row">
+              <input id="tv-playlist-input" class="input-field" placeholder="…or paste a playlist link / ID">
+              <button id="btn-tv-load" class="btn btn-secondary">Load</button>
+            </div>
+            <p id="tv-playlist-status" class="tv-status"></p>
+            <div id="tv-progress" class="playlist-progress hidden">
+              <div id="tv-progress-fill" class="playlist-progress-fill"></div>
+              <span id="tv-progress-label" class="playlist-progress-label"></span>
+            </div>
+          </div>
+          <p id="tv-ready-note" class="tv-status"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Game -->
+  <section id="tv-game" class="tv-screen">
+    <header class="tv-topbar">
+      <div class="logo-sm">HITSTER</div>
+      <div id="tv-turn" class="tv-turn"></div>
+      <div id="tv-roundinfo" class="tv-roundinfo"></div>
+    </header>
+    <div class="tv-stage">
+      <div class="tv-song" id="tv-song">
+        <div class="vinyl-disc"><div class="vinyl-label"><span>♪</span></div></div>
+        <div class="tv-song-text">
+          <p id="tv-song-title" class="tv-song-title">???</p>
+          <p id="tv-song-artist" class="tv-song-artist">&nbsp;</p>
+          <p id="tv-song-year" class="tv-song-year">????</p>
+        </div>
+      </div>
+      <div id="tv-steal" class="tv-steal hidden">
+        <div class="tv-steal-time" id="tv-steal-time">15</div>
+        <div class="tv-steal-text" id="tv-steal-text"></div>
+      </div>
+      <div id="tv-results" class="tv-results hidden"></div>
+    </div>
+    <div id="tv-columns" class="tv-columns"></div>
+    <div id="tv-toasts" class="tv-toasts"></div>
+  </section>
+
+  <!-- Winner -->
+  <section id="tv-winner" class="tv-screen">
+    <div class="tv-center">
+      <p class="winner-label">🏆 Winner!</p>
+      <h1 id="tv-winner-name" class="tv-winner-name"></h1>
+      <p id="tv-winner-sub" class="tv-sub"></p>
+    </div>
+  </section>
+
+  <div id="tv-banner" class="tv-banner hidden"></div>
+  <div class="tv-volume" id="tv-volume-box">
+    🔊 <input type="range" id="tv-volume" min="0" max="1" step="0.05" value="0.8">
+  </div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="/js/tv.js"></script>
+</body>
+</html>

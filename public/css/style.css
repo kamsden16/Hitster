@@ -708,8 +708,10 @@ body {
 @media (max-width: 768px) {
   .game-layout { grid-template-columns: 1fr; }
   .now-playing-panel, .timeline-panel { display: none; }
-  .room-layout { grid-template-columns: 1fr; }
-  .players-panel { max-height: 200px; overflow-y: auto; }
+  .room-layout { grid-template-columns: 1fr; grid-template-rows: auto; align-content: start; }
+  /* these two are pinned to column 2 on desktop, which squeezes the lobby into two slivers on a phone */
+  .host-controls, .waiting-panel { grid-column: 1; grid-row: auto; }
+  .players-panel { max-height: none; }
 }
 
 /* ─── TOKENS ─────────────────────────────────────────────────────────────────── */
@@ -1149,3 +1151,28 @@ body {
 }
 
 .editor-input-year { max-width: 80px; flex: none; }
+
+
+/* ─── LANDING: join without Spotify + TV mode toggle ──────────────────────────── */
+.landing-block { display: flex; flex-direction: column; gap: 10px; width: 100%; }
+.landing-title { font-size: 16px; font-weight: 600; text-align: left; }
+.landing-or { width: 100%; margin: 4px 0; }
+.mode-toggle { display: flex; align-items: center; gap: 12px; cursor: pointer; user-select: none; padding: 6px 0; }
+.mode-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.mode-toggle-track { width: 48px; height: 28px; border-radius: 999px; background: var(--surface2); border: 1px solid var(--border); position: relative; transition: background .2s; flex-shrink: 0; }
+.mode-toggle-knob { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--text-muted); transition: all .2s; }
+.mode-toggle input:checked + .mode-toggle-track { background: var(--accent); border-color: var(--accent); }
+.mode-toggle input:checked + .mode-toggle-track .mode-toggle-knob { left: 23px; background: #fff; }
+.mode-toggle input:focus-visible + .mode-toggle-track { outline: 2px solid var(--accent2); outline-offset: 2px; }
+.mode-toggle-label { font-size: 16px; font-weight: 600; }
+
+/* TV-mode host status + notices */
+.tv-host-status { display: flex; flex-direction: column; gap: 6px; background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.tv-host-line { font-size: 14px; }
+.tv-host-line.ok { color: var(--green); }
+.tv-host-line.bad { color: var(--accent2); }
+.notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 12px 16px 0; padding: 12px 14px; background: var(--surface2); border: 1px solid var(--accent2); border-radius: 12px; font-size: 14px; }
+.phone-banner { position: fixed; top: 0; left: 0; right: 0; z-index: 900; background: var(--accent); color: #fff; text-align: center; padding: 8px 12px; font-size: 14px; font-weight: 600; }
+
+/* In TV mode the timelines are on the TV, but players still need their own to place guesses and steals */
+body.tv-mode .timeline-panel { display: block; }

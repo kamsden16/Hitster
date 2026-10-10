@@ -1,0 +1,73 @@
+/* TV display — big type, meant for a laptop on a TV (16:9), no scrolling */
+body.tv-page { overflow: hidden; height: 100vh; }
+.tv-screen { display: none; min-height: 100vh; height: 100vh; }
+.tv-screen.active { display: flex; flex-direction: column; }
+
+.tv-center { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 20px; text-align: center; padding: 24px; }
+.tv-sub { color: var(--text-muted); font-size: clamp(18px, 2.2vw, 30px); }
+.tv-btn { font-size: clamp(16px, 1.6vw, 24px); padding: 16px 32px; width: auto; }
+.tv-warn { color: var(--accent2); font-size: 18px; max-width: 560px; }
+.tv-code-input { font-size: 56px; text-align: center; letter-spacing: 12px; max-width: 420px; }
+
+/* Lobby */
+.tv-lobby-grid { flex: 1; display: grid; grid-template-columns: minmax(320px, 40%) 1fr; gap: 40px; padding: 4vh 4vw; align-items: center; }
+.tv-join-card { background: var(--surface); border: 1px solid var(--border); border-radius: 28px; padding: 32px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.tv-join-url { font-size: clamp(16px, 1.8vw, 26px); font-weight: 600; word-break: break-all; text-align: center; }
+.tv-code { font-family: var(--font-display); font-size: clamp(80px, 12vw, 190px); letter-spacing: 12px; line-height: 1;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+.tv-qr { width: min(280px, 22vw); background: #fff; border-radius: 16px; padding: 8px; }
+.tv-lobby-side h2 { font-family: var(--font-display); font-size: clamp(32px, 3.4vw, 54px); letter-spacing: 2px; margin-bottom: 10px; }
+.tv-players { list-style: none; display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 28px; }
+.tv-players li { background: var(--surface2); border: 1px solid var(--border); border-radius: 999px; padding: 10px 22px; font-size: clamp(18px, 2vw, 30px); font-weight: 600; }
+.tv-players li.offline { opacity: .45; }
+.tv-players li .player-host-badge { margin-left: 8px; }
+.tv-setup { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; }
+.tv-setup h3 { font-size: 20px; }
+.tv-status { color: var(--text-muted); font-size: 16px; }
+.tv-status.ok { color: var(--green); }
+.tv-status.bad { color: var(--accent2); }
+.tv-playlists { max-height: 28vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 12px; }
+.tv-playlists .playlist-item { padding: 10px 14px; cursor: pointer; display: flex; justify-content: space-between; gap: 12px; }
+.tv-playlists .playlist-item:hover { background: var(--surface2); }
+
+/* Game */
+.tv-topbar { display: flex; align-items: center; justify-content: space-between; padding: 14px 3vw; border-bottom: 1px solid var(--border); }
+.tv-turn { font-family: var(--font-display); font-size: clamp(30px, 3.4vw, 56px); letter-spacing: 2px; color: var(--accent2); }
+.tv-roundinfo { color: var(--text-muted); font-size: clamp(14px, 1.4vw, 22px); text-align: right; }
+.tv-stage { display: flex; align-items: center; justify-content: center; gap: 4vw; padding: 2.5vh 3vw; min-height: 26vh; position: relative; }
+.tv-song { display: flex; align-items: center; gap: 28px; }
+.tv-song .vinyl-disc { width: clamp(90px, 11vw, 180px); height: clamp(90px, 11vw, 180px); animation: spin 6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.tv-song-title { font-size: clamp(28px, 3.6vw, 60px); font-weight: 700; }
+.tv-song-artist { font-size: clamp(20px, 2.4vw, 40px); color: var(--text-muted); }
+.tv-song-year { font-family: var(--font-display); font-size: clamp(48px, 6vw, 100px); color: var(--accent); line-height: 1; }
+.tv-song.unrevealed .tv-song-title, .tv-song.unrevealed .tv-song-artist, .tv-song.unrevealed .tv-song-year { opacity: .35; }
+.tv-steal { text-align: center; background: var(--surface); border: 2px solid var(--accent2); border-radius: 24px; padding: 16px 32px; }
+.tv-steal-time { font-family: var(--font-display); font-size: clamp(60px, 8vw, 130px); line-height: 1; color: var(--accent2); }
+.tv-steal-text { font-size: clamp(16px, 1.8vw, 28px); }
+.tv-results { display: flex; flex-direction: column; gap: 6px; font-size: clamp(16px, 1.8vw, 28px); }
+.tv-results .r-ok { color: var(--green); }
+.tv-results .r-bad { color: var(--text-muted); }
+
+.tv-columns { flex: 1; display: flex; gap: 14px; padding: 0 3vw 3vh; min-height: 0; }
+.tv-col { flex: 1; min-width: 0; background: var(--surface); border: 2px solid var(--border); border-radius: 18px; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.tv-col.active { border-color: var(--accent2); box-shadow: 0 0 0 3px rgba(255,140,66,.25); }
+.tv-col.offline { opacity: .5; }
+.tv-col-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.tv-col-name { font-size: clamp(18px, 2vw, 32px); font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tv-col-meta { font-size: clamp(14px, 1.5vw, 24px); white-space: nowrap; }
+.tv-cards { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 5px; min-height: 0; }
+.tv-card { display: flex; gap: 10px; align-items: baseline; background: var(--surface2); border-radius: 8px; padding: 5px 10px; font-size: clamp(12px, 1.25vw, 20px); min-width: 0; }
+.tv-card b { font-family: var(--font-display); font-size: 1.5em; color: var(--accent); letter-spacing: 1px; }
+.tv-card span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tv-empty { color: var(--text-muted); font-size: 14px; padding: 8px; }
+
+.tv-toasts { position: fixed; left: 50%; bottom: 3vh; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; align-items: center; z-index: 20; }
+.tv-toast { background: var(--surface2); border: 1px solid var(--border); border-radius: 999px; padding: 10px 24px; font-size: clamp(16px, 1.8vw, 28px); }
+
+.tv-winner-name { font-family: var(--font-display); font-size: clamp(80px, 12vw, 200px); line-height: 1; color: var(--accent2); }
+.tv-banner { position: fixed; top: 0; left: 0; right: 0; background: var(--accent); color: #fff; text-align: center; padding: 10px; font-size: 20px; font-weight: 600; z-index: 50; }
+.tv-volume { position: fixed; right: 16px; bottom: 12px; font-size: 14px; color: var(--text-muted); opacity: .6; z-index: 10; }
+.tv-volume:hover { opacity: 1; }
+.tv-col.dense .tv-card { font-size: clamp(10px, 1vw, 15px); padding: 3px 8px; }
+.tv-col.dense .tv-cards { gap: 3px; }

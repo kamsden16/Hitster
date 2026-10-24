@@ -123,7 +123,23 @@ If your timeline has songs from 1975 and 1995, and the new song is from 1983:
 
 ---
 
-## 6. Playlist Tips
+## 6. TV Mode (laptop on a TV, no Spotify on phones)
+
+For a living-room game: one laptop plugged into the TV plays the music and shows everyone's timelines, and each player uses their own phone as a controller. Only the laptop's Spotify account (Premium) is needed — players and the host just open the site.
+
+1. **Host's phone:** open the site, switch on **📺 TV mode**, enter your name and tap **Create TV Room**. You get a 5-letter room code.
+2. **Laptop on the TV:** open `/tv.html` (e.g. `https://your-app.up.railway.app/tv.html`), connect Spotify, enter the room code, and click **Tap to enable audio** (browsers only allow sound after a click). Pick the playlist here — the host's phone doesn't need one.
+3. **Players:** scan the QR code on the TV (or open the site, enter name + code). No Spotify login needed.
+4. **Host's phone:** **Start Game** unlocks once the TV is connected, audio is enabled and a playlist is loaded. The host still runs the game from the phone (next round, tokens, edit timelines, year override).
+
+Notes:
+- TV mode is chosen when the room is created and can't be changed mid-game. Rooms without TV mode work as before (music plays through Spotify on each phone).
+- If the TV drops mid-game, phones stay in the game but the next song waits until the TV is back (the laptop reconnects by itself; you may need to click **Enable audio** again if the page was reloaded).
+- Spotify's browser player needs HTTPS, so use the deployed site (or `localhost` on the laptop). Smart-TV browsers usually can't run it — use a laptop on HDMI.
+
+---
+
+## 7. Playlist Tips
 
 - Use a playlist **owned by your Spotify account** (copied playlists count as yours)
 - The playlist must have at least 15 tracks with known release years

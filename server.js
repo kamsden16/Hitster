@@ -22,6 +22,7 @@ const PORT = parseInt(process.env.PORT || '3000');
 const BASE_URL = process.env.BASE_URL || `http://127.0.0.1:${PORT}`;
 const WIN_SCORE = parseInt(process.env.WIN_SCORE || '10');
 // How long a disconnected player is held before the game moves on / their seat is released
+const STEAL_MS = 15000;
 const TURN_GRACE_MS = parseInt(process.env.TURN_GRACE_MS || '30000');   // active player gone mid-turn
 const HOST_GRACE_MS = parseInt(process.env.HOST_GRACE_MS || '30000');   // host gone → promote someone
 const REMOVE_AFTER_MS = parseInt(process.env.REMOVE_AFTER_MS || String(5 * 60 * 1000)); // seat released
@@ -161,6 +162,21 @@ app.get('/auth/callback', async (req, res) => {
   } catch (err) {
     console.error('Auth error:', err.response?.data || err.message);
     res.send('<p>Authentication failed. Please close this window and try again.</p>');
+  }
+});
+
+// QR code for the TV lobby: scanning it opens the landing page with the room code filled in
+app.get('/qr/:code.svg', async (req, res) => {
+  const code = String(req.params.code || '').toUpperCase();
+  if (!/^[A-Z0-9]{5}$/.test(code)) return res.status(400).end();
+  const proto = (req.get('x-forwarded-proto') || req.protocol).split(',')[0].trim();
+  const url = `${proto}://${req.get('host')}/?code=${code}`;
+  try {
+    const svg = await require('qrcode').toString(url, { type: 'svg', margin: 1, color: { dark: '#0a0a0f', light: '#ffffff' } });
+    res.type('image/svg+xml').set('Cache-Control', 'public, max-age=3600').send(svg);
+  } catch (err) {
+    console.error('QR error:', err.message);
+    res.status(500).end();
   }
 });
 
@@ -394,6 +410,11 @@ function getRoomState(room) {
     } : null,
     winScore: WIN_SCORE,
     winner: room.winner || null,
+    tvMode: !!room.tvMode,
+    tvConnected: !!(room.display && room.display.connected),
+    tvReady: displayReady(room),
+    waitingForTv: !!room.heldRound,
+    playlistCount: room.playlist.length,
     // Someone has reached WIN_SCORE — game ends at the end of this rotation if they lead outright
     finalRound: room.players.some(p => p.timeline.length >= WIN_SCORE),
     turnInCycle: (room.cycleTurns || []).filter(id => room.players.some(p => p.id === id)).length,
@@ -484,6 +505,34 @@ function roundStartPayload(track) {
   return { trackId: track.id, uri: track.uri, preview_url: track.preview_url };
 }
 
+// ─── TV display (TV mode) ─────────────────────────────────────────────────────
+// In a TV-mode room one laptop attaches as the display: it logs into Spotify, picks the playlist
+// and plays every song. It is not a player — it just sits in the socket.io room and watches.
+function displayReady(room) {
+  return !!(room.display && room.display.connected && room.display.ready);
+}
+
+function roomOfDisplay(socketId) {
+  return Object.values(rooms).find(r => r.display && r.display.id === socketId) || null;
+}
+
+// Carry Spotify tokens from an old socket to a new one (unless the new one has its own)
+function moveTokens(oldId, newId) {
+  let carried = false;
+  if (!userTokens[newId] && userTokens[oldId]) { userTokens[newId] = userTokens[oldId]; carried = true; }
+  if (oldId !== newId) delete userTokens[oldId];
+  return carried;
+}
+
+function clearDisplayTimer(display) {
+  if (display && display.removeTimer) { clearTimeout(display.removeTimer); display.removeTimer = null; }
+}
+
+// The socket that loads playlists for this room (and gets progress): host normally, the TV in TV mode
+function playlistLoaderId(room) {
+  return room.tvMode ? room.display?.id : room.hostId;
+}
+
 // ─── Player presence / rejoin ─────────────────────────────────────────────────
 // A disconnected player keeps their seat, timeline and tokens. They come back by joining the
 // same room with the same name; their id is re-pointed at the new socket (see rebindPlayer),
@@ -501,6 +550,11 @@ function destroyRoom(code) {
   clearStealTimer(room);
   clearTurnTimer(room);
   room.players.forEach(clearPlayerTimers);
+  if (room.display) {
+    clearDisplayTimer(room.display);
+    delete userTokens[room.display.id];
+    io.to(code).emit('room:gone');
+  }
   delete rooms[code];
 }
 
@@ -616,6 +670,7 @@ function resyncPlayer(socket, room) {
       guessedYear: room.currentPlayerGuess,
       activePlayerName: active?.name || 'Player',
       activePlayerTimeline: room.roundTimelineSnapshot || [],
+      stealMsLeft: Math.max(0, (room.stealEndsAt || 0) - Date.now()),
       alreadyStole: (room.stealAttempts || []).some(a => a.socketId === socket.id)
     });
   } else if (room.phase === 'reveal' && room.lastReveal) {
@@ -671,6 +726,13 @@ function startRound(code, { keepPlayer = false } = {}) {
   if (!room || !room.players.length) return;
   clearStealTimer(room);
   clearTurnTimer(room);
+  // TV mode: no song without the TV. Hold the round; it starts when the display is ready again.
+  if (room.tvMode && !displayReady(room)) {
+    room.heldRound = { keepPlayer };
+    io.to(code).emit('room:state', getRoomState(room));
+    return;
+  }
+  room.heldRound = null;
   room.absentPrompt = null;
   room.hostWaiting = null;
   room.lastReveal = null;
@@ -732,11 +794,13 @@ function validYear(y) {
 io.on('connection', socket => {
   console.log('Connected:', socket.id);
 
-  socket.on('room:create', ({ playerName }) => {
+  socket.on('room:create', ({ playerName, tvMode }) => {
     const code = generateCode();
     rooms[code] = {
       code,
       hostId: socket.id,
+      tvMode: !!tvMode, // music plays on a laptop/TV display, not on players' phones
+      display: null,
       phase: 'lobby',
       players: [],
       playlist: [],
@@ -784,7 +848,7 @@ io.on('connection', socket => {
 
   socket.on('playlist:load', async ({ code, playlistId }) => {
     const room = rooms[code];
-    if (!room || room.hostId !== socket.id) return;
+    if (!room || playlistLoaderId(room) !== socket.id) return; // TV mode: only the TV loads playlists
     const loadId = (room.playlistLoadId || 0) + 1;
     room.playlistLoadId = loadId;
     try {
@@ -797,8 +861,9 @@ io.on('connection', socket => {
           if (known.has(t.id)) continue;
           r.playlist.splice(Math.floor(Math.random() * (r.playlist.length + 1)), 0, t);
         }
-        const host = io.sockets.sockets.get(r.hostId);
-        if (host) host.emit('playlist:loaded', { count: r.playlist.length });
+        const loader = io.sockets.sockets.get(playlistLoaderId(r));
+        if (loader) loader.emit('playlist:loaded', { count: r.playlist.length });
+        io.to(code).emit('room:state', getRoomState(r));
       };
       const tracks = await getPlaylistTracks(socket.id, playlistId, addBackgroundTracks);
       if (tracks.length < WIN_SCORE + 5) {
@@ -825,7 +890,8 @@ io.on('connection', socket => {
   socket.on('game:start', ({ code }) => {
     const room = rooms[code];
     if (!room || room.hostId !== socket.id) return;
-    if (!room.playlist.length) return socket.emit('room:error', 'Load a playlist first');
+    if (room.tvMode && !displayReady(room)) return socket.emit('room:error', 'Connect the TV display first');
+    if (!room.playlist.length) return socket.emit('room:error', room.tvMode ? 'Load a playlist on the TV first' : 'Load a playlist first');
     clearStealTimer(room);
     room.currentPlayerId = null;
     room.cycleTurns = [];
@@ -851,17 +917,19 @@ io.on('connection', socket => {
     // Open steal window — others can now spend tokens to steal
     room.phase = 'steal';
     room.stealAttempts = [];
+    room.stealEndsAt = Date.now() + STEAL_MS;
 
     io.to(code).emit('room:state', getRoomState(room));
     io.to(code).emit('steal:window', {
       guessedYear: guess,
       activePlayerName: player.name,
-      activePlayerTimeline: room.roundTimelineSnapshot
+      activePlayerTimeline: room.roundTimelineSnapshot,
+      stealMsLeft: STEAL_MS
     });
 
-    // Auto-advance to reveal after 15 seconds
+    // Auto-advance to reveal after the steal window
     clearStealTimer(room);
-    room.stealTimeout = setTimeout(() => revealRound(code), 15000);
+    room.stealTimeout = setTimeout(() => revealRound(code), STEAL_MS);
   });
 
   // Any non-active player can spend 1 token to steal during steal phase (one attempt each)
@@ -897,6 +965,64 @@ io.on('connection', socket => {
     if (!room || room.phase !== 'steal') return;
     if (socket.id !== room.hostId && socket.id !== room.currentPlayerId) return;
     revealRound(code);
+  });
+
+  // ─── TV display ──────────────────────────────────────────────────────────────
+  // The laptop on the TV attaches to a TV-mode room (after logging into Spotify on its own socket).
+  socket.on('display:attach', ({ code, token }) => {
+    code = String(code || '').trim().toUpperCase();
+    const fail = (reason, message) => socket.emit('display:attach_failed', { reason, message });
+    const room = rooms[code];
+    if (!room) return fail('gone', 'Room not found');
+    if (!room.tvMode) return fail('mode', 'That room is not in TV mode');
+    const d = room.display;
+    if (d && d.id === socket.id) return;
+    // A returning TV (same token) or a replacement for an offline one can take over; a live TV can't be stolen
+    const takeover = d && (d.connected === false || (token && token === d.token));
+    if (d && !takeover) return fail('busy', 'Another screen is already the TV for this room');
+    if (!userTokens[socket.id] && !(d && userTokens[d.id])) return fail('login', 'Log in to Spotify on this screen first');
+
+    let carried = false;
+    if (d) {
+      clearDisplayTimer(d);
+      const oldId = d.id;
+      carried = moveTokens(oldId, socket.id);
+      const stale = io.sockets.sockets.get(oldId);
+      if (stale) { stale.leave(code); stale.emit('display:replaced'); }
+      d.id = socket.id;
+      d.connected = true;
+      d.ready = false;
+    } else {
+      room.display = { id: socket.id, token: crypto.randomBytes(12).toString('hex'), connected: true, ready: false };
+    }
+    socket.join(code);
+    socket.emit('display:attached', { code, token: room.display.token });
+    io.to(code).emit('room:state', getRoomState(room));
+    resyncPlayer(socket, room);
+    console.log(`TV display attached → ${code}`);
+    if (carried) {
+      refreshToken(socket.id).then(access_token => {
+        if (access_token) socket.emit('auth:success', { access_token, display_name: userTokens[socket.id]?.display_name || 'TV' });
+      });
+    }
+  });
+
+  // The display reports whether its Spotify player is up and audio is unlocked
+  socket.on('display:ready', ({ ready }) => {
+    const room = roomOfDisplay(socket.id);
+    if (!room) return;
+    room.display.ready = !!ready;
+    io.to(room.code).emit('room:state', getRoomState(room));
+    if (displayReady(room) && room.heldRound) {
+      const held = room.heldRound;
+      room.heldRound = null;
+      startRound(room.code, held);
+    }
+  });
+
+  // Fresh Spotify access token for the display (they expire hourly and the SDK asks for them)
+  socket.on('display:token', async ack => {
+    if (typeof ack === 'function') ack(await refreshToken(socket.id));
   });
 
   // Host's answer to "active player is offline — skip them or keep waiting?"
@@ -971,6 +1097,7 @@ io.on('connection', socket => {
     const room = rooms[code];
     if (!room || room.hostId !== socket.id) return;
     clearStealTimer(room);
+    room.heldRound = null;
     room.players.forEach(p => { p.timeline = []; p.ready = false; p.tokens = 2; });
     room.usedTracks = [];
     room.currentTrack = null;
@@ -1048,6 +1175,22 @@ io.on('connection', socket => {
   socket.on('disconnect', () => {
     let inRoom = false;
     for (const code in rooms) {
+      const room = rooms[code];
+      if (room.display && room.display.id === socket.id) {
+        inRoom = true;
+        const d = room.display;
+        d.connected = false;
+        d.ready = false;
+        clearDisplayTimer(d);
+        // Gone for good: free the slot (and its Spotify login) so another screen can take over
+        d.removeTimer = setTimeout(() => {
+          if (rooms[code] !== room || room.display !== d || d.connected) return;
+          delete userTokens[d.id];
+          room.display = null;
+          io.to(code).emit('room:state', getRoomState(room));
+        }, REMOVE_AFTER_MS);
+        io.to(code).emit('room:state', getRoomState(room));
+      }
       const player = rooms[code].players.find(p => p.id === socket.id);
       if (!player) continue;
       inRoom = true;

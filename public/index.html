@@ -22,11 +22,38 @@
           <div class="vinyl-label"><span>♪</span></div>
         </div>
       </div>
-      <button id="btn-spotify-login" class="btn btn-spotify">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>
-        Connect with Spotify
-      </button>
-      <p class="note">Spotify Premium required for in-browser playback</p>
+
+      <!-- Join without Spotify (works in TV-mode rooms, where music plays on the TV) -->
+      <div class="landing-block" id="landing-join">
+        <h3 class="landing-title">Join a game</h3>
+        <input type="text" id="landing-name" placeholder="Your name" maxlength="20" class="input-field">
+        <input type="text" id="landing-code" placeholder="Room code" maxlength="5" class="input-field code-input">
+        <button id="btn-landing-join" class="btn btn-secondary">Join Room</button>
+      </div>
+
+      <div class="divider-or landing-or"><span>or host a game</span></div>
+
+      <label class="mode-toggle" for="toggle-tv-mode">
+        <input type="checkbox" id="toggle-tv-mode">
+        <span class="mode-toggle-track"><span class="mode-toggle-knob"></span></span>
+        <span class="mode-toggle-label">📺 TV mode</span>
+      </label>
+
+      <!-- TV mode off: the classic flow, music plays through Spotify on each phone -->
+      <div class="landing-block" id="host-classic">
+        <button id="btn-spotify-login" class="btn btn-spotify">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>
+          Connect with Spotify
+        </button>
+        <p class="note">Spotify Premium required for in-browser playback</p>
+      </div>
+
+      <!-- TV mode on: music plays on a laptop connected to the TV, phones need no Spotify -->
+      <div class="landing-block hidden" id="host-tv">
+        <input type="text" id="landing-host-name" placeholder="Your name" maxlength="20" class="input-field">
+        <button id="btn-create-tv-room" class="btn btn-primary">Create TV Room</button>
+        <p class="note">Open <strong>/tv.html</strong> on the laptop connected to the TV. It plays the music, you don't need Spotify on your phone.</p>
+      </div>
     </div>
   </div>
 
@@ -64,6 +91,11 @@
       </div>
     </header>
 
+    <div id="notice-spotify" class="notice hidden">
+      🎧 This room plays music through Spotify on your phone.
+      <button id="btn-notice-spotify" class="btn btn-spotify btn-sm">Connect Spotify</button>
+    </div>
+
     <div class="room-layout">
       <!-- Players list -->
       <div class="players-panel">
@@ -76,6 +108,10 @@
       <!-- Host controls -->
       <div class="host-controls" id="host-controls">
         <h3>Host Controls</h3>
+        <div id="tv-host-status" class="tv-host-status hidden">
+          <p id="tv-host-line-tv" class="tv-host-line"></p>
+          <p id="tv-host-line-playlist" class="tv-host-line"></p>
+        </div>
         <button id="btn-reconnect-spotify" class="btn btn-sm btn-secondary">↻ Reconnect Spotify</button>
         <div id="playlist-section">
           <button id="btn-load-playlists" class="btn btn-secondary btn-sm">Browse My Playlists</button>

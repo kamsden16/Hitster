@@ -65,6 +65,7 @@ socket.on('room:rejoin_failed', () => {
 
 socket.on('auth:success', ({ access_token, display_name }) => {
   state.accessToken = access_token;
+  document.getElementById('notice-spotify').classList.add('hidden');
   document.getElementById('player-name-badge').textContent = display_name;
   // When this fires on a rejoin we're already in a room — don't yank the player back to the lobby
   if (!state.roomCode) {
@@ -87,6 +88,8 @@ socket.on('room:joined', ({ code, playerId, rejoinToken, rejoined }) => {
 
 socket.on('room:state', (roomState) => {
   state.roomState = roomState;
+  document.body.classList.toggle('tv-mode', !!roomState.tvMode);
+  updateTvBanner(roomState);
   state.isHost = roomState.players.find(p => p.id === state.playerId)?.isHost || false;
   updateRoomUI(roomState);
 
@@ -192,6 +195,57 @@ document.getElementById('btn-reconnect-spotify') && document.getElementById('btn
   await spotifyLogout();
   const loginUrl = `/auth/login?socketId=${socket.id}`;
   window.open(loginUrl, '_blank', 'width=500,height=700');
+});
+
+// ─── Landing: join without Spotify, TV-mode toggle ───────────────────────────────
+const landingCodeParam = new URLSearchParams(location.search).get('code');
+if (landingCodeParam) {
+  const c = landingCodeParam.toUpperCase().slice(0, 5);
+  document.getElementById('landing-code').value = c;
+  document.getElementById('input-room-code').value = c;
+}
+
+document.getElementById('toggle-tv-mode').addEventListener('change', e => {
+  document.getElementById('host-tv').classList.toggle('hidden', !e.target.checked);
+  document.getElementById('host-classic').classList.toggle('hidden', e.target.checked);
+});
+
+document.getElementById('landing-code').addEventListener('input', e => {
+  e.target.value = e.target.value.toUpperCase();
+});
+
+document.getElementById('btn-landing-join').addEventListener('click', () => {
+  const name = document.getElementById('landing-name').value.trim();
+  const code = document.getElementById('landing-code').value.trim().toUpperCase();
+  if (!name || !code) return alert('Enter your name and room code');
+  state.playerName = name;
+  socket.emit('room:join', { code, playerName: name });
+});
+
+document.getElementById('btn-create-tv-room').addEventListener('click', () => {
+  const name = document.getElementById('landing-host-name').value.trim();
+  if (!name) return alert('Enter your name');
+  state.playerName = name;
+  socket.emit('room:create', { playerName: name, tvMode: true });
+});
+
+// A banner while the TV is away mid-game (the next song waits for it)
+function updateTvBanner(rs) {
+  const need = rs.tvMode && !['lobby', 'ended'].includes(rs.phase) && !rs.tvReady;
+  let b = document.getElementById('tv-away-banner');
+  if (need && !b) {
+    b = document.createElement('div');
+    b.id = 'tv-away-banner';
+    b.className = 'phone-banner';
+    b.textContent = '📺 TV disconnected — the next song starts when it is back';
+    document.body.appendChild(b);
+  } else if (!need && b) {
+    b.remove();
+  }
+}
+
+document.getElementById('btn-notice-spotify').addEventListener('click', () => {
+  window.open(`/auth/login?socketId=${socket.id}`, '_blank', 'width=500,height=700');
 });
 
 // ─── Token controls ──────────────────────────────────────────────────────────
@@ -389,6 +443,25 @@ function updateRoomUI(roomState) {
     gameTokenControls.classList.add('hidden');
   }
 
+  // TV mode: music and playlists live on the TV; the host's phone only runs the game
+  const tvStatus = document.getElementById('tv-host-status');
+  const tvMode = !!roomState.tvMode;
+  document.getElementById('playlist-section').classList.toggle('hidden', tvMode);
+  document.getElementById('btn-reconnect-spotify').classList.toggle('hidden', tvMode);
+  tvStatus.classList.toggle('hidden', !tvMode);
+  document.getElementById('notice-spotify').classList.toggle('hidden', tvMode || !!state.accessToken);
+  if (tvMode) {
+    const tvLine = document.getElementById('tv-host-line-tv');
+    tvLine.textContent = roomState.tvReady ? '📺 TV connected, audio ready ✓'
+      : roomState.tvConnected ? '📺 TV connected — tap "Enable audio" on it'
+      : '📺 Waiting for the TV — open /tv.html on the laptop and enter code ' + roomState.code;
+    tvLine.className = 'tv-host-line ' + (roomState.tvReady ? 'ok' : 'bad');
+    const plLine = document.getElementById('tv-host-line-playlist');
+    plLine.textContent = roomState.playlistCount ? `🎵 Playlist loaded: ${roomState.playlistCount} tracks ✓` : '🎵 Pick a playlist on the TV';
+    plLine.className = 'tv-host-line ' + (roomState.playlistCount ? 'ok' : 'bad');
+    document.getElementById('btn-start-game').disabled = !(roomState.tvReady && roomState.playlistCount > 0);
+  }
+
   // Show/hide host controls
   const hostCtrl = document.getElementById('host-controls');
   const waitingPanel = document.getElementById('waiting-panel');
@@ -507,7 +580,9 @@ function startRound(uri, preview_url) {
   // Play music
   // On HTTPS: use Web Playback SDK (in-browser)
   // On HTTP: fall back to active Spotify device (phone/desktop app must be open)
-  if (uri) {
+  if (state.roomState?.tvMode) {
+    document.getElementById('player-status').textContent = '🎵 Music plays on the TV';
+  } else if (uri) {
     playSpotifyTrack(uri);
   } else {
     document.getElementById('player-status').textContent = 'No track URI available';

@@ -815,6 +815,9 @@ function initSpotifyPlayer(token) {
       document.getElementById('player-status').textContent = '⚠️ Spotify Premium required';
     });
 
+    // Stop when the song ends, so Spotify's Autoplay can't roll on into a "similar" song
+    player.addListener('player_state_changed', sdkState => handleSdkState(player, sdkState));
+
     player.connect().then(success => {
       if (!success) console.error('SDK player failed to connect');
     });
@@ -840,7 +843,7 @@ async function playWithSDK(uri, attempt = 1) {
       {
         method: 'PUT',
         headers: { Authorization: `Bearer ${state.accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uris: [uri], position_ms: 30000 })
+        body: JSON.stringify({ uris: [uri], position_ms: 0 })
       }
     );
     if (res.status === 204 || res.ok) {
@@ -861,6 +864,60 @@ async function playWithSDK(uri, attempt = 1) {
   }
 }
 
+// ─── Stop at the end of the song ──────────────────────────────────────────────
+// Songs play once from the start. When one finishes, Spotify's Autoplay may start a
+// "similar" song; if anything other than the round's song plays after it, we pause.
+const isRoundTrack = (t, uri) => !!t && (t.uri === uri || t.linked_from?.uri === uri);
+let sdkEndTimer = null;
+let appEndTimer = null;
+
+function handleSdkState(player, s) {
+  const uri = state.currentUri;
+  if (!s || s.paused || !uri) return;
+  const tw = s.track_window || {};
+  if (isRoundTrack(tw.current_track, uri)) {
+    // Backstop in case Autoplay doesn't show up in previous_tracks: check just after the song should end
+    clearTimeout(sdkEndTimer);
+    sdkEndTimer = setTimeout(async () => {
+      if (state.currentUri !== uri) return;
+      const now = await player.getCurrentState().catch(() => null);
+      if (now && !now.paused && !isRoundTrack(now.track_window?.current_track, uri)) player.pause().catch(() => {});
+    }, Math.max(0, s.duration - s.position) + 1500);
+  } else if ((tw.previous_tracks || []).some(t => isRoundTrack(t, uri))) {
+    player.pause().catch(() => {});
+  }
+}
+
+// The Spotify app sends no events, so poll its player state around the song's end
+function watchAppTrackEnd(uri) {
+  clearTimeout(appEndTimer);
+  let seen = false, tries = 0;
+  const headers = () => ({ Authorization: `Bearer ${state.accessToken}` });
+  const check = async () => {
+    if (state.currentUri !== uri) return;
+    try {
+      const res = await fetch('https://api.spotify.com/v1/me/player', { headers: headers() });
+      const p = res.status === 204 ? null : await res.json();
+      if (isRoundTrack(p?.item, uri)) {
+        if (!p.is_playing) return; // stopped on our song: nothing more to do
+        seen = true;
+        const left = p.item.duration_ms - p.progress_ms;
+        appEndTimer = setTimeout(check, Math.max(500, Math.min(left + 300, 30000)));
+      } else if (seen) {
+        if (p?.is_playing) {
+          const q = p.device?.id ? `?device_id=${p.device.id}` : '';
+          await fetch(`https://api.spotify.com/v1/me/player/pause${q}`, { method: 'PUT', headers: headers() });
+        }
+      } else if (++tries < 10) {
+        appEndTimer = setTimeout(check, 2000); // our song hasn't started on the app yet
+      }
+    } catch (e) {
+      if (++tries < 10) appEndTimer = setTimeout(check, 5000);
+    }
+  };
+  appEndTimer = setTimeout(check, 2000);
+}
+
 // Fallback: play on user's external Spotify app (phone/desktop)
 async function playOnActiveDevice(uri) {
   const statusEl = document.getElementById('player-status');
@@ -877,10 +934,11 @@ async function playOnActiveDevice(uri) {
     const res = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device.id}`, {
       method: 'PUT',
       headers: { Authorization: `Bearer ${state.accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uris: [uri], position_ms: 30000 })
+      body: JSON.stringify({ uris: [uri], position_ms: 0 })
     });
     if (res.status === 204 || res.ok) {
       statusEl.textContent = `▶ Playing on: ${device.name}`;
+      watchAppTrackEnd(uri);
     } else {
       const err = await res.json().catch(() => ({}));
       statusEl.textContent = `Playback error (${res.status}): ${err?.error?.message || ''}`;
@@ -892,6 +950,7 @@ async function playOnActiveDevice(uri) {
 
 async function playSpotifyTrack(uri) {
   if (!state.accessToken) return;
+  state.currentUri = uri;
 
   if (state.spotifyDeviceId) {
     // SDK device is ready — play directly in browser

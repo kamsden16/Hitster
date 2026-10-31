@@ -402,6 +402,8 @@ function initPlayer() {
     player.addListener('initialization_error', ({ message }) => setAudioStatus('Init error: ' + message, 'bad'));
     player.addListener('authentication_error', ({ message }) => setAudioStatus('Auth error — reload and reconnect Spotify', 'bad'));
     player.addListener('account_error', () => setAudioStatus('⚠️ Spotify Premium required', 'bad'));
+    // Stop when the song ends, so Spotify's Autoplay can't roll on into a "similar" song
+    player.addListener('player_state_changed', s => handleSdkState(player, s));
     player.connect();
     $('btn-tv-audio').classList.remove('hidden');
   };
@@ -419,13 +421,37 @@ $('btn-tv-audio').addEventListener('click', () => {
 });
 $('btn-tv-audio').classList.add('hidden');
 
+// ─── Stop at the end of the song ──────────────────────────────────────────────
+// Songs play once from the start. When one finishes, Spotify's Autoplay may start a
+// "similar" song; if anything other than the round's song plays after it, we pause.
+const isRoundTrack = (t, uri) => !!t && (t.uri === uri || t.linked_from?.uri === uri);
+let sdkEndTimer = null;
+
+function handleSdkState(player, s) {
+  const uri = state.currentUri;
+  if (!s || s.paused || !uri) return;
+  const tw = s.track_window || {};
+  if (isRoundTrack(tw.current_track, uri)) {
+    // Backstop in case Autoplay doesn't show up in previous_tracks: check just after the song should end
+    clearTimeout(sdkEndTimer);
+    sdkEndTimer = setTimeout(async () => {
+      if (state.currentUri !== uri) return;
+      const now = await player.getCurrentState().catch(() => null);
+      if (now && !now.paused && !isRoundTrack(now.track_window?.current_track, uri)) player.pause().catch(() => {});
+    }, Math.max(0, s.duration - s.position) + 1500);
+  } else if ((tw.previous_tracks || []).some(t => isRoundTrack(t, uri))) {
+    player.pause().catch(() => {});
+  }
+}
+
 async function playTrack(uri, attempt = 1) {
+  state.currentUri = uri;
   if (!state.deviceId || !state.deviceReady) { state.pendingUri = uri; return; }
   if (attempt > 1) await new Promise(r => setTimeout(r, [0, 1000, 2000, 3000, 5000][attempt - 1] || 5000));
   try {
     const res = await spotifyApi(`/me/player/play?device_id=${state.deviceId}`, {
       method: 'PUT',
-      body: JSON.stringify({ uris: [uri], position_ms: 30000 })
+      body: JSON.stringify({ uris: [uri], position_ms: 0 })
     });
     if (res.ok) setAudioStatus('▶ Playing', 'ok');
     else if (res.status === 404 && attempt < 5) playTrack(uri, attempt + 1);
